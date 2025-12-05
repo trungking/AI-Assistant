@@ -1,4 +1,10 @@
-export type Provider = 'openai' | 'google' | 'anthropic' | 'openrouter';
+export type Provider = string;
+
+export interface CustomProvider {
+  id: string; // internal id (e.g. 'custom-1')
+  name: string; // display name (e.g. 'Local Mistral')
+  baseUrl: string;
+}
 
 export interface PromptTemplate {
   id: string;
@@ -7,8 +13,8 @@ export interface PromptTemplate {
   immediate?: boolean;
   onlyImage?: boolean;
   hotkey?: {
-      key: string;
-      modifiers: string[];
+    key: string;
+    modifiers: string[];
   } | null;
 }
 
@@ -26,14 +32,15 @@ export interface ApiConfig {
 }
 
 export interface AppConfig {
-  apiKeys: Record<Provider, string[]>; // Allow multiple keys per provider
-  selectedProvider: Provider;
-  customBaseUrls: Record<Provider, string>;
+  apiKeys: Record<string, string[]>; // Allow multiple keys per provider
+  selectedProvider: string;
+  customBaseUrls: Record<string, string>;
   prompts: PromptTemplate[];
-  selectedModel: Record<Provider, string>;
+  selectedModel: Record<string, string>;
+  customProviders: CustomProvider[];
   customHotkey: {
-      key: string;
-      modifiers: string[];
+    key: string;
+    modifiers: string[];
   } | null;
   theme: 'system' | 'light' | 'dark';
 }
@@ -66,6 +73,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     anthropic: 'claude-3-haiku-20240307',
     openrouter: 'google/gemini-2.0-flash-exp:free',
   },
+  customProviders: [],
   customHotkey: null,
   theme: 'system'
 };

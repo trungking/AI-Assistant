@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AI Assistant",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Ask AI with selected text context.",
   "permissions": [
     "activeTab",
@@ -24,8 +24,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["assets/content.js"]
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "assets/content.js"
+      ]
     }
   ],
   "commands": {
