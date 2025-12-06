@@ -52,7 +52,7 @@ export function SearchableSelect({ value, options, onChange, onCustomClick, plac
             </button>
 
             {isOpen && (
-                <div className="absolute top-full left-0 right-0 mt-1 bg-white dark:bg-gpt-sidebar border border-slate-200 dark:border-gpt-hover rounded-lg shadow-lg z-50 max-h-60 flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-100">
+                <div className="absolute top-full left-0 right-0 mt-1 bg-white dark:bg-gpt-sidebar border border-slate-200 dark:border-gpt-hover rounded-lg shadow-lg z-50 max-h-96 flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-100">
                     <div className="p-2 border-b border-slate-100 dark:border-gpt-hover">
                         <div className="relative">
                             <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />

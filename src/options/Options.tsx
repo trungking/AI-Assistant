@@ -461,8 +461,8 @@ export default function Options() {
                         {/* API Configuration Grid */}
                         <div className="grid grid-cols-1 gap-6">
                             {allProviders.map((provider) => (
-                                <div key={provider} className="bg-white dark:bg-gpt-sidebar rounded-2xl shadow-sm border border-slate-200 dark:border-gpt-hover overflow-hidden transition-all hover:shadow-md duration-300">
-                                    <div className="px-6 py-4 border-b border-slate-100 dark:border-gpt-hover bg-slate-50/50 dark:bg-gpt-hover/20 flex items-center justify-between">
+                                <div key={provider} className="bg-white dark:bg-gpt-sidebar rounded-2xl shadow-sm border border-slate-200 dark:border-gpt-hover transition-all hover:shadow-md duration-300">
+                                    <div className="px-6 py-4 border-b border-slate-100 dark:border-gpt-hover bg-slate-50/50 dark:bg-gpt-hover/20 flex items-center justify-between rounded-t-2xl">
                                         <h3 className="font-bold text-slate-800 dark:text-gpt-text flex items-center gap-2">
                                             {getProviderName(provider)}
                                         </h3>
