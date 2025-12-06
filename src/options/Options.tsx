@@ -2,10 +2,11 @@ import { useState, useEffect } from 'react';
 import { type AppConfig, DEFAULT_CONFIG, type Provider, type PromptTemplate } from '../lib/types';
 import { getStorage, setStorage } from '../lib/storage';
 import { fetchModels } from '../lib/api';
-import { useTheme } from '../lib/hooks';
+import { useTheme } from '../lib/theme';
 import { Trash2, Plus, RotateCcw, Eye, EyeOff, Key, MessageSquareText, Settings2, CheckCircle2, RefreshCw, List, Keyboard, Cpu, X, Download, Upload } from 'lucide-react';
 import { SearchableSelect } from './SearchableSelect';
 import { clsx } from 'clsx';
+
 
 const Providers: Provider[] = ['openai', 'google', 'anthropic', 'openrouter'];
 
@@ -37,7 +38,10 @@ export default function Options() {
         return config.customProviders?.find(p => p.id === id)?.name || id;
     };
 
-    useTheme(config);
+    const isDark = useTheme(config.theme);
+    useEffect(() => {
+        document.documentElement.classList.toggle('dark', isDark);
+    }, [isDark]);
 
     useEffect(() => {
         getStorage().then((data) => {
@@ -346,6 +350,32 @@ export default function Options() {
                                         <Settings2 size={16} />
                                     </div>
                                 </div>
+                            </div>
+                        </div>
+
+                        <div className="bg-white dark:bg-gpt-sidebar rounded-2xl shadow-sm border border-slate-200 dark:border-gpt-hover p-6">
+                            <h3 className="text-base font-bold text-slate-900 dark:text-gpt-text mb-4 flex items-center gap-2">
+                                <div className="w-1 h-5 bg-blue-600 rounded-full"></div>
+                                Startup
+                            </h3>
+                            <div className="max-w-md">
+                                <label className="block text-xs font-semibold text-slate-500 dark:text-gpt-secondary mb-1.5 uppercase tracking-wider">Startup Mode</label>
+                                <div className="relative">
+                                    <select
+                                        value={config.popupMode || 'content_script'}
+                                        onChange={(e) => saveConfig({ ...config, popupMode: e.target.value as 'extension' | 'content_script' })}
+                                        className="w-full p-3 bg-slate-50 dark:bg-gpt-input border border-slate-200 dark:border-gpt-hover rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all font-medium text-slate-700 dark:text-gpt-text appearance-none"
+                                    >
+                                        <option value="content_script">In-Page JS Popup (Default)</option>
+                                        <option value="extension">Extension Popup</option>
+                                    </select>
+                                    <div className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
+                                        <Settings2 size={16} />
+                                    </div>
+                                </div>
+                                <p className="text-xs text-slate-400 dark:text-gpt-secondary mt-2">
+                                    "In-Page JS Popup" renders within the page, allowing resizing and better interaction with page content.
+                                </p>
                             </div>
                         </div>
 

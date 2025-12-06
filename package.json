@@ -1,11 +1,11 @@
 {
   "name": "ai-assistant",
   "private": true,
-  "version": "1.0.8",
+  "version": "1.0.21",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node scripts/bump-version.js && tsc -b && vite build",
+    "build": "node scripts/bump-version.js && tsc -b && vite build && vite build -c vite.content.config.ts",
     "lint": "eslint .",
     "preview": "vite preview"
   },

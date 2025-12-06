@@ -1,6 +1,8 @@
 import type { AppConfig, PromptTemplate } from '../lib/types';
+import { openContentPopup } from './ContentPopup';
 
 // Inline Default Config to avoid shared chunk import issues in content scripts
+// (Or import from types if build confirms it works, forcing inline here for safety as before)
 const DEFAULT_PROMPTS: PromptTemplate[] = [
     { id: '1', name: 'Summarize', content: 'Summarize the following text:\n\n${text}' },
     { id: '2', name: 'Explain', content: 'Explain this text in simple terms:\n\n${text}' },
@@ -31,7 +33,9 @@ const DEFAULT_CONFIG: AppConfig = {
     },
     customProviders: [],
     customHotkey: null,
-    theme: 'system'
+    theme: 'system',
+    popupMode: 'extension',
+    popupSize: { width: 450, height: 600 }
 };
 
 const getStorage = async (): Promise<AppConfig> => {
@@ -54,6 +58,20 @@ const init = async () => {
 chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'sync' && changes.appConfig) {
         config = changes.appConfig.newValue as AppConfig;
+    }
+});
+
+// Listen for messages from background script
+chrome.runtime.onMessage.addListener((message) => {
+    if (message.action === 'open_content_popup') {
+        if (config) {
+            openContentPopup(config, message.selection || '', message.image || null);
+        } else {
+            getStorage().then(cfg => {
+                config = cfg;
+                openContentPopup(cfg, message.selection || '', message.image || null);
+            });
+        }
     }
 });
 
@@ -85,17 +103,22 @@ window.addEventListener('keydown', (e) => {
             e.preventDefault();
             e.stopPropagation();
             // Get selection
-            const selection = window.getSelection()?.toString();
-            (async () => {
-                try {
-                    await chrome.runtime.sendMessage({
-                        action: 'open_popup_hotkey',
-                        selection: selection
-                    });
-                } catch (err) {
-                    console.error('[AI Assistant] Failed to send message:', err);
-                }
-            })();
+            const selection = window.getSelection()?.toString() || '';
+
+            if (config.popupMode === 'content_script') {
+                openContentPopup(config, selection, null);
+            } else {
+                (async () => {
+                    try {
+                        await chrome.runtime.sendMessage({
+                            action: 'open_popup_hotkey',
+                            selection: selection
+                        });
+                    } catch (err) {
+                        console.error('[AI Assistant] Failed to send message:', err);
+                    }
+                })();
+            }
             return;
         }
     }
@@ -122,18 +145,29 @@ window.addEventListener('keydown', (e) => {
             ) {
                 e.preventDefault();
                 e.stopPropagation();
-                const selection = window.getSelection()?.toString();
-                (async () => {
-                    try {
-                        await chrome.runtime.sendMessage({
-                            action: 'execute_prompt_hotkey',
-                            selection: selection,
-                            promptId: prompt.id
-                        });
-                    } catch (err) {
-                        console.error('[AI Assistant] Failed to send message:', err);
-                    }
-                })();
+                const selection = window.getSelection()?.toString() || '';
+
+                if (config.popupMode === 'content_script') {
+                    openContentPopup(config, selection, null, prompt.content, prompt);
+                    // Note: auto-execute logic for prompt could be handled here if we passed 'immediate' flag or ID
+                    // Currently ChatInterface checks props. But ContentPopup signature needs adjustment to support prompt object?
+                    // openContentPopup accepts 'instruction'.
+                    // If prompt is immediate, we should probably handle that in ContentPopup or ChatInterface.
+                    // ChatInterface handles 'pendingAutoPrompt'.
+                    // I should update openContentPopup to accept pendingAutoPrompt.
+                } else {
+                    (async () => {
+                        try {
+                            await chrome.runtime.sendMessage({
+                                action: 'execute_prompt_hotkey',
+                                selection: selection,
+                                promptId: prompt.id
+                            });
+                        } catch (err) {
+                            console.error('[AI Assistant] Failed to send message:', err);
+                        }
+                    })();
+                }
                 return;
             }
         }

@@ -1,24 +1,24 @@
 import { DEFAULT_CONFIG } from '../lib/types';
 
 chrome.runtime.onInstalled.addListener(async () => {
-  // Initialize storage with defaults if not present
-  const { appConfig } = await chrome.storage.sync.get('appConfig');
-  if (!appConfig) {
-    await chrome.storage.sync.set({ appConfig: DEFAULT_CONFIG });
-  }
+    // Initialize storage with defaults if not present
+    const { appConfig } = await chrome.storage.sync.get('appConfig');
+    if (!appConfig) {
+        await chrome.storage.sync.set({ appConfig: DEFAULT_CONFIG });
+    }
 
-  // Create context menu
-  chrome.contextMenus.create({
-    id: "ai-ask-context",
-    title: "Ask AI Assistant",
-    contexts: ["selection"]
-  });
+    // Create context menu
+    chrome.contextMenus.create({
+        id: "ai-ask-context",
+        title: "Ask AI Assistant",
+        contexts: ["selection"]
+    });
 
-  chrome.contextMenus.create({
-    id: "ai-ask-image",
-    title: "Ask AI about this image",
-    contexts: ["image"]
-  });
+    chrome.contextMenus.create({
+        id: "ai-ask-image",
+        title: "Ask AI about this image",
+        contexts: ["image"]
+    });
 });
 
 const openUi = async () => {
@@ -60,31 +60,52 @@ const openUi = async () => {
 };
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId === "ai-ask-context" && tab?.id) {
-    let selectedText = info.selectionText || '';
-    
-    // Try to get better text with newlines via script
-    try {
-        const results = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            func: () => window.getSelection()?.toString() || ''
-        });
-        if (results[0]?.result) {
-            selectedText = results[0].result;
-        }
-    } catch (e) {
-        console.error("Failed to retrieve selection via script, falling back to info.selectionText", e);
-    }
+    const { appConfig } = await chrome.storage.sync.get('appConfig');
+    const mode = (appConfig as any)?.popupMode || 'extension';
 
-    await chrome.storage.local.set({ contextSelection: selectedText, contextImage: null });
-    await openUi();
-  } else if (info.menuItemId === "ai-ask-image" && info.srcUrl) {
-      await chrome.storage.local.set({ contextSelection: null, contextImage: info.srcUrl });
-      await openUi();
-  }
+    if (info.menuItemId === "ai-ask-context" && tab?.id) {
+        let selectedText = info.selectionText || '';
+
+        // Try to get better text with newlines via script
+        try {
+            const results = await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                func: () => window.getSelection()?.toString() || ''
+            });
+            if (results[0]?.result) {
+                selectedText = results[0].result;
+            }
+        } catch (e) {
+            console.error("Failed to retrieve selection via script, falling back to info.selectionText", e);
+        }
+
+        if (mode === 'content_script') {
+            chrome.tabs.sendMessage(tab.id, {
+                action: 'open_content_popup',
+                selection: selectedText,
+                image: null
+            });
+        } else {
+            await chrome.storage.local.set({ contextSelection: selectedText, contextImage: null });
+            await openUi();
+        }
+    } else if (info.menuItemId === "ai-ask-image" && info.srcUrl && tab?.id) {
+        if (mode === 'content_script') {
+            chrome.tabs.sendMessage(tab.id, {
+                action: 'open_content_popup',
+                selection: '',
+                image: info.srcUrl
+            });
+        } else {
+            await chrome.storage.local.set({ contextSelection: null, contextImage: info.srcUrl });
+            await openUi();
+        }
+    }
 });
 
-chrome.runtime.onMessage.addListener((message) => {
+import { executeApiCall, executeFetchModels } from '../lib/api';
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.action === 'open_popup_hotkey') {
         // Store selection if present
         if (message.selection) {
@@ -102,5 +123,15 @@ chrome.runtime.onMessage.addListener((message) => {
         chrome.storage.local.set(data).then(() => {
             openUi();
         });
+    } else if (message.type === 'PROXY_API_CALL') {
+        executeApiCall(message.data.messages, message.data.config)
+            .then(sendResponse)
+            .catch(err => sendResponse({ error: err.message }));
+        return true; // Keep channel open for async response
+    } else if (message.type === 'PROXY_FETCH_MODELS') {
+        executeFetchModels(message.data.provider, message.data.apiKey, message.data.baseUrl)
+            .then(data => sendResponse(data))
+            .catch(err => sendResponse({ error: err.message }));
+        return true; // Keep channel open
     }
 });

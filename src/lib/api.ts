@@ -5,7 +5,7 @@ interface ApiResponse {
   error?: string;
 }
 
-export const callApi = async (
+export const executeApiCall = async (
   messages: ChatMessage[],
   config: AppConfig
 ): Promise<ApiResponse> => {
@@ -40,7 +40,24 @@ export const callApi = async (
   }
 };
 
-export const fetchModels = async (
+export const callApi = async (
+  messages: ChatMessage[],
+  config: AppConfig
+): Promise<ApiResponse> => {
+  // Check context
+  if (window.location.protocol.startsWith('http')) {
+    // Content Script -> Proxy to Background
+    return chrome.runtime.sendMessage({
+      type: 'PROXY_API_CALL',
+      data: { messages, config }
+    });
+  } else {
+    // Extension Context -> Direct Call
+    return executeApiCall(messages, config);
+  }
+};
+
+export const executeFetchModels = async (
   provider: string,
   apiKey: string,
   baseUrl?: string
@@ -70,10 +87,24 @@ export const fetchModels = async (
       const data = await res.json();
       return (data.data || []).map((m: any) => m.id).sort();
     }
-    return [];
   } catch (e) {
     console.error("Failed to fetch models", e);
     throw e;
+  }
+};
+
+export const fetchModels = async (
+  provider: string,
+  apiKey: string,
+  baseUrl?: string
+): Promise<string[]> => {
+  if (window.location.protocol.startsWith('http')) {
+    return chrome.runtime.sendMessage({
+      type: 'PROXY_FETCH_MODELS',
+      data: { provider, apiKey, baseUrl }
+    });
+  } else {
+    return executeFetchModels(provider, apiKey, baseUrl);
   }
 };
 

@@ -43,6 +43,8 @@ export interface AppConfig {
     modifiers: string[];
   } | null;
   theme: 'system' | 'light' | 'dark';
+  popupMode?: 'extension' | 'content_script';
+  popupSize?: { width: number; height: number };
 }
 
 export const DEFAULT_PROMPTS: PromptTemplate[] = [
@@ -75,5 +77,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   customProviders: [],
   customHotkey: null,
-  theme: 'system'
+  theme: 'system',
+  popupMode: 'content_script',
+  popupSize: { width: 450, height: 600 }
 };
