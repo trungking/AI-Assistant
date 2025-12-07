@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { type AppConfig, type ChatMessage, type PromptTemplate, type Provider } from '../lib/types';
 import { callApi, fetchModels } from '../lib/api';
-import { Send, Settings, Sparkles, Loader2, User, Bot, Trash2, Zap, Image as ImageIcon, ChevronDown, Check, X, Copy, PauseCircle } from 'lucide-react';
+import { Send, Settings, Sparkles, Loader2, User, Bot, Trash2, Zap, Image as ImageIcon, ChevronDown, Check, X, Copy, PauseCircle, SquarePen } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
@@ -345,14 +345,25 @@ export default function ChatInterface({
                         onMouseDown={e => e.preventDefault()} // Prevent native image drag
                     />
 
-                    <div className="relative min-w-0 max-w-[200px]" ref={modelMenuRef}>
+                    <div className="relative min-w-0 flex-1" ref={modelMenuRef}>
                         <button
                             onMouseDown={e => e.stopPropagation()} // Allow click but don't start dragging window
                             onClick={() => setIsModelMenuOpen(!isModelMenuOpen)}
-                            className="w-full flex items-center justify-between gap-2 bg-transparent font-bold text-sm text-slate-900 dark:text-white focus:outline-none cursor-pointer py-1 truncate hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
+                            className="flex items-center gap-2 bg-transparent focus:outline-none cursor-pointer hover:bg-slate-100 dark:hover:bg-gpt-hover p-1.5 -ml-1.5 rounded-lg transition-colors group max-w-full"
                         >
-                            <span className="truncate">{config.selectedModel[config.selectedProvider] || 'Select Model'}</span>
-                            <ChevronDown size={14} className={clsx("shrink-0 transition-transform", isModelMenuOpen && "rotate-180")} />
+                            <div className="flex flex-col items-start min-w-0">
+                                <span className="text-[10px] font-bold text-slate-400 dark:text-gpt-secondary uppercase tracking-wider leading-none mb-0.5">
+                                    {(() => {
+                                        const p = config.selectedProvider;
+                                        const custom = config.customProviders?.find(cp => cp.id === p);
+                                        return custom ? custom.name : p;
+                                    })()}
+                                </span>
+                                <span className="text-sm font-semibold text-slate-900 dark:text-gray-100 truncate w-full text-left group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors">
+                                    {config.selectedModel[config.selectedProvider] || 'Select Model'}
+                                </span>
+                            </div>
+                            <ChevronDown size={14} className={clsx("shrink-0 text-slate-400 group-hover:text-blue-500 transition-transform", isModelMenuOpen && "rotate-180")} />
                         </button>
 
                         {isModelMenuOpen && (
@@ -387,7 +398,10 @@ export default function ChatInterface({
                                     {filteredModelGroups.map(group => (
                                         <div key={group.provider} className="mb-2 last:mb-0">
                                             <div className="px-3 py-1.5 text-[10px] font-bold text-slate-400 dark:text-gpt-secondary uppercase tracking-wider">
-                                                {group.provider}
+                                                {(() => {
+                                                    const custom = config.customProviders?.find(cp => cp.id === group.provider);
+                                                    return custom ? custom.name : group.provider;
+                                                })()}
                                             </div>
                                             {group.models.map(m => {
                                                 const isSelected = config.selectedProvider === group.provider && config.selectedModel[group.provider] === m;
@@ -415,6 +429,17 @@ export default function ChatInterface({
                     </div>
                 </div>
                 <div className="flex items-center gap-2" onMouseDown={e => e.stopPropagation()}>
+                    <button
+                        onClick={() => {
+                            setMessages([]);
+                            setInstruction('');
+                            setError('');
+                        }}
+                        className="text-slate-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 p-2 rounded-lg transition-all duration-200 shrink-0"
+                        title="New Chat"
+                    >
+                        <SquarePen size={18} />
+                    </button>
                     {!hideSettings && (
                         <button
                             onClick={openOptions}
