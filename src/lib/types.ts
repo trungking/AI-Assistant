@@ -43,6 +43,10 @@ export interface AppConfig {
     key: string;
     modifiers: string[];
   } | null;
+  cropHotkey: {
+    key: string;
+    modifiers: string[];
+  } | null;
   theme: 'system' | 'light' | 'dark';
   popupMode?: 'extension' | 'content_script';
   popupSize?: { width: number; height: number };
@@ -78,6 +82,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   customProviders: [],
   customHotkey: null,
+  cropHotkey: null,
   theme: 'system',
   popupMode: 'content_script',
   popupSize: { width: 450, height: 600 }

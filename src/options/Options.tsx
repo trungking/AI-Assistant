@@ -839,6 +839,72 @@ export default function Options() {
                             </div>
                         </div>
 
+                        {/* Screen Crop Hotkey */}
+                        <div className="bg-white dark:bg-gpt-sidebar rounded-2xl shadow-sm border border-slate-200 dark:border-gpt-hover p-6">
+                            <h3 className="text-lg font-bold text-slate-900 dark:text-gpt-text mb-2">Screen Crop Shortcut</h3>
+                            <p className="text-sm text-slate-500 dark:text-gpt-secondary mb-6">
+                                Define a keyboard shortcut to capture a region of the screen and attach it to the chat.
+                            </p>
+
+                            <div className="max-w-md">
+                                <label className="block text-xs font-bold text-slate-500 dark:text-gpt-secondary mb-2 uppercase tracking-wider">Shortcut</label>
+                                <div
+                                    className={clsx(
+                                        "w-full h-14 flex items-center justify-center border-2 rounded-xl text-lg font-mono font-medium cursor-pointer transition-all select-none",
+                                        recordingTarget === 'crop'
+                                            ? "border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 shadow-[0_0_0_4px_rgba(59,130,246,0.1)]"
+                                            : "border-slate-200 dark:border-gpt-hover bg-slate-50 dark:bg-gpt-input text-slate-700 dark:text-gpt-text hover:border-slate-300 dark:hover:border-gpt-text hover:bg-white dark:hover:bg-gpt-hover"
+                                    )}
+                                    onClick={() => setRecordingTarget('crop')}
+                                    onKeyDown={(e) => {
+                                        e.preventDefault();
+                                        if (recordingTarget !== 'crop') return;
+
+                                        const modifiers = [];
+                                        if (e.ctrlKey) modifiers.push('ctrl');
+                                        if (e.altKey) modifiers.push('alt');
+                                        if (e.shiftKey) modifiers.push('shift');
+                                        if (e.metaKey) modifiers.push('meta');
+
+                                        const key = e.key.toLowerCase();
+                                        if (['control', 'alt', 'shift', 'meta'].includes(key)) return;
+
+                                        saveConfig({ ...config, cropHotkey: { key, modifiers } });
+                                        setRecordingTarget(null);
+                                    }}
+                                    tabIndex={0}
+                                    onBlur={() => setRecordingTarget(null)}
+                                >
+                                    {recordingTarget === 'crop' ? (
+                                        <span className="animate-pulse">Press keys...</span>
+                                    ) : config.cropHotkey ? (
+                                        <div className="flex items-center gap-2">
+                                            {config.cropHotkey.modifiers.map(m => (
+                                                <kbd key={m} className="px-2 py-1 bg-white dark:bg-gpt-sidebar border border-slate-300 dark:border-gpt-hover rounded-md text-sm shadow-sm uppercase">{m}</kbd>
+                                            ))}
+                                            <span className="text-slate-400">+</span>
+                                            <kbd className="px-2 py-1 bg-white dark:bg-gpt-sidebar border border-slate-300 dark:border-gpt-hover rounded-md text-sm shadow-sm uppercase">{config.cropHotkey.key}</kbd>
+                                        </div>
+                                    ) : (
+                                        <span className="text-slate-400 italic">Click to set (e.g. Ctrl+Shift+S)</span>
+                                    )}
+                                </div>
+                                {config.cropHotkey && (
+                                    <div className="flex justify-end mt-2">
+                                        <button
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                saveConfig({ ...config, cropHotkey: null });
+                                            }}
+                                            className="text-xs text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 px-2 py-1 rounded transition-colors"
+                                        >
+                                            Clear Shortcut
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
                         <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-100 dark:border-amber-800 rounded-xl p-4 flex gap-3">
                             <div className="text-amber-500 shrink-0 mt-0.5">
                                 <Keyboard size={20} />

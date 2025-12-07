@@ -143,7 +143,7 @@ chrome.runtime.onConnect.addListener((port) => {
     }
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === 'open_popup_hotkey') {
         // Store selection if present
         if (message.selection) {
@@ -161,6 +161,40 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         chrome.storage.local.set(data).then(() => {
             openUi();
         });
+    } else if (message.action === 'capture_screenshot') {
+        // Capture the visible tab as a screenshot
+        (async () => {
+            try {
+                const windowId = sender.tab?.windowId;
+                // Use current window if windowId is undefined
+                const dataUrl = await chrome.tabs.captureVisibleTab(
+                    windowId ?? chrome.windows.WINDOW_ID_CURRENT,
+                    { format: 'png' }
+                );
+                sendResponse({ dataUrl });
+            } catch (err: any) {
+                sendResponse({ error: err.message });
+            }
+        })();
+        return true; // Keep channel open for async response
+    } else if (message.action === 'open_with_image') {
+        // Open popup with cropped image
+        (async () => {
+            const { appConfig } = await chrome.storage.sync.get('appConfig');
+            const mode = (appConfig as any)?.popupMode || 'extension';
+            const tabId = sender.tab?.id;
+
+            if (mode === 'content_script' && tabId) {
+                chrome.tabs.sendMessage(tabId, {
+                    action: 'open_content_popup',
+                    selection: '',
+                    image: message.image
+                });
+            } else {
+                await chrome.storage.local.set({ contextSelection: null, contextImage: message.image });
+                await openUi();
+            }
+        })();
     } else if (message.type === 'PROXY_API_CALL') {
         executeApiCall(message.data.messages, message.data.config)
             .then(sendResponse)

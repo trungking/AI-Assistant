@@ -1,5 +1,6 @@
 import type { AppConfig, PromptTemplate } from '../lib/types';
 import { openContentPopup } from './ContentPopup';
+import { startCropMode } from './CropOverlay';
 
 // Inline Default Config to avoid shared chunk import issues in content scripts
 // (Or import from types if build confirms it works, forcing inline here for safety as before)
@@ -33,6 +34,7 @@ const DEFAULT_CONFIG: AppConfig = {
     },
     customProviders: [],
     customHotkey: null,
+    cropHotkey: null,
     theme: 'system',
     popupMode: 'extension',
     popupSize: { width: 450, height: 600 }
@@ -82,6 +84,48 @@ window.addEventListener('keydown', (e) => {
     const eventKey = e.key.toLowerCase();
     // Helper to ignore modifier keys themselves
     if (['control', 'alt', 'shift', 'meta'].includes(eventKey)) return;
+
+    // Check Crop Hotkey
+    if (config.cropHotkey) {
+        const { key, modifiers } = config.cropHotkey;
+        const targetKey = key.toLowerCase();
+
+        const ctrl = modifiers.includes('ctrl') || modifiers.includes('control');
+        const alt = modifiers.includes('alt');
+        const shift = modifiers.includes('shift');
+        const meta = modifiers.includes('meta') || modifiers.includes('command');
+
+        if (
+            eventKey === targetKey &&
+            e.ctrlKey === ctrl &&
+            e.altKey === alt &&
+            e.shiftKey === shift &&
+            e.metaKey === meta
+        ) {
+            e.preventDefault();
+            e.stopPropagation();
+
+            // Start crop mode
+            startCropMode(
+                (imageDataUrl: string) => {
+                    // Crop completed, open popup with image
+                    if (config!.popupMode === 'content_script') {
+                        openContentPopup(config!, '', imageDataUrl);
+                    } else {
+                        chrome.runtime.sendMessage({
+                            action: 'open_with_image',
+                            image: imageDataUrl
+                        });
+                    }
+                },
+                () => {
+                    // Crop canceled
+                    console.log('[AI Assistant] Crop canceled');
+                }
+            );
+            return;
+        }
+    }
 
     // Check Global Hotkey
     if (config.customHotkey) {
