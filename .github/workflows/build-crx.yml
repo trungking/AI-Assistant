@@ -6,13 +6,66 @@ on:
       - main
       - master
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build even without version change'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  check-version:
     runs-on: ubuntu-latest
+    outputs:
+      version_changed: ${{ steps.check.outputs.version_changed }}
+      version: ${{ steps.check.outputs.version }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check for version change
+        id: check
+        run: |
+          # Get current version
+          CURRENT_VERSION=$(jq -r '.version' package.json)
+          echo "Current version: $CURRENT_VERSION"
+          echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          
+          # Check if this is a force build
+          if [ "${{ github.event.inputs.force_build }}" == "true" ]; then
+            echo "Force build requested"
+            echo "version_changed=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Get previous version (from parent commit)
+          git show HEAD^:package.json > /tmp/old_package.json 2>/dev/null || {
+            echo "No previous commit found, this is likely the first commit"
+            echo "version_changed=true" >> $GITHUB_OUTPUT
+            exit 0
+          }
+          
+          PREVIOUS_VERSION=$(jq -r '.version' /tmp/old_package.json)
+          echo "Previous version: $PREVIOUS_VERSION"
+          
+          if [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ]; then
+            echo "Version changed from $PREVIOUS_VERSION to $CURRENT_VERSION"
+            echo "version_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "Version unchanged"
+            echo "version_changed=false" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: check-version
+    runs-on: ubuntu-latest
+    if: needs.check-version.outputs.version_changed == 'true'
     
     steps:
       - name: Checkout code
@@ -30,60 +83,48 @@ jobs:
       - name: Build extension
         run: npm run build:ci
 
-      - name: Get version from manifest
-        id: version
-        run: |
-          VERSION=$(jq -r '.version' dist/manifest.json)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
       - name: Create CRX package
         run: |
           # Create a zip file first (Chrome Web Store format)
           cd dist
-          zip -r ../ai-assistant-${{ steps.version.outputs.version }}.zip .
+          zip -r ../ai-assistant-${{ needs.check-version.outputs.version }}.zip .
           cd ..
 
       - name: Upload extension ZIP as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ai-assistant-${{ steps.version.outputs.version }}
-          path: ai-assistant-${{ steps.version.outputs.version }}.zip
+          name: ai-assistant-${{ needs.check-version.outputs.version }}
+          path: ai-assistant-${{ needs.check-version.outputs.version }}.zip
           retention-days: 30
 
       - name: Upload unpacked extension
         uses: actions/upload-artifact@v4
         with:
-          name: ai-assistant-unpacked-${{ steps.version.outputs.version }}
+          name: ai-assistant-unpacked-${{ needs.check-version.outputs.version }}
           path: dist/
           retention-days: 30
 
   release:
-    needs: build
+    needs: [check-version, build]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    if: needs.check-version.outputs.version_changed == 'true' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Get version from package.json
-        id: version
-        run: |
-          VERSION=$(jq -r '.version' package.json)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: ai-assistant-${{ steps.version.outputs.version }}
+          name: ai-assistant-${{ needs.check-version.outputs.version }}
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: AI Assistant v${{ steps.version.outputs.version }}
+          tag_name: v${{ needs.check-version.outputs.version }}
+          name: AI Assistant v${{ needs.check-version.outputs.version }}
           body: |
-            ## AI Assistant Chrome Extension v${{ steps.version.outputs.version }}
+            ## AI Assistant Chrome Extension v${{ needs.check-version.outputs.version }}
             
             ### Installation
             1. Download the ZIP file below
@@ -94,7 +135,7 @@ jobs:
             
             Or use the unpacked artifact for direct loading.
           files: |
-            ai-assistant-${{ steps.version.outputs.version }}.zip
+            ai-assistant-${{ needs.check-version.outputs.version }}.zip
           draft: false
           prerelease: false
         env:
