@@ -1,5 +1,5 @@
 import type { AppConfig, PromptTemplate } from '../lib/types';
-import { openContentPopup } from './ContentPopup';
+import { openContentPopup, closeContentPopup, isContentPopupOpen } from './ContentPopup';
 import { startCropMode } from './CropOverlay';
 
 // Inline Default Config to avoid shared chunk import issues in content scripts
@@ -146,17 +146,20 @@ window.addEventListener('keydown', (e) => {
         ) {
             e.preventDefault();
             e.stopPropagation();
-            // Get selection
-            const selection = window.getSelection()?.toString() || '';
 
             if (config.popupMode === 'content_script') {
-                openContentPopup(config, selection, null);
+                if (isContentPopupOpen()) {
+                    closeContentPopup();
+                } else {
+                    const selection = window.getSelection()?.toString() || '';
+                    openContentPopup(config, selection, null);
+                }
             } else {
                 (async () => {
                     try {
                         await chrome.runtime.sendMessage({
-                            action: 'open_popup_hotkey',
-                            selection: selection
+                            action: 'toggle_popup_hotkey',
+                            selection: window.getSelection()?.toString() || ''
                         });
                     } catch (err) {
                         console.error('[AI Assistant] Failed to send message:', err);

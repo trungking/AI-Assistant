@@ -144,7 +144,7 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.action === 'open_popup_hotkey') {
+    if (message.action === 'open_popup_hotkey' || message.action === 'toggle_popup_hotkey') {
         // Store selection if present
         if (message.selection) {
             chrome.storage.local.set({ contextSelection: message.selection }).then(() => {
