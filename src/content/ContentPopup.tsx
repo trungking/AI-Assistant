@@ -9,6 +9,21 @@ import { useState, useRef, useEffect } from 'react';
 let root: Root | null = null;
 let shadowContainer: HTMLElement | null = null;
 
+export const isContentPopupOpen = (): boolean => {
+    return root !== null && shadowContainer !== null;
+};
+
+export const closeContentPopup = (): void => {
+    if (root) {
+        root.unmount();
+        root = null;
+    }
+    if (shadowContainer) {
+        shadowContainer.remove();
+        shadowContainer = null;
+    }
+};
+
 export const openContentPopup = (
     config: AppConfig,
     selection: string,
