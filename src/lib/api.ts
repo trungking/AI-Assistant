@@ -520,7 +520,7 @@ const callOpenAI = async (apiKey: string, baseUrl: string, model: string, messag
   }
 
   const data = await response.json();
-  return { text: data.choices?.[0]?.message?.content || '' };
+  return { text: data.choices?.[0]?.message?.content || data.choices?.[0]?.text || '' };
 };
 
 const callAnthropic = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[]): Promise<ApiResponse> => {
@@ -777,41 +777,53 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
   let fullText = '';
   let toolCalls: any[] = [];
 
-  await readStream(response, (text) => {
-    fullText += text;
-    onChunk(text);
-  }, (line) => {
-    const trim = line.trim();
-    if (!trim || !trim.startsWith('data: ')) return null;
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    const data = await response.json();
+    const choice = data.choices?.[0];
+    fullText = choice?.message?.content || choice?.text || '';
+    if (fullText) onChunk(fullText);
 
-    const dataStr = trim.slice(6);
-    if (dataStr === '[DONE]') return null;
+    if (choice?.message?.tool_calls) {
+      toolCalls = choice.message.tool_calls;
+    }
+  } else {
+    await readStream(response, (text) => {
+      fullText += text;
+      onChunk(text);
+    }, (line) => {
+      const trim = line.trim();
+      if (!trim || !trim.startsWith('data: ')) return null;
 
-    try {
-      const json = JSON.parse(dataStr);
-      const choice = json.choices?.[0];
+      const dataStr = trim.slice(6);
+      if (dataStr === '[DONE]') return null;
 
-      // Check for tool calls
-      if (choice?.delta?.tool_calls) {
-        for (const tc of choice.delta.tool_calls) {
-          if (tc.index !== undefined) {
-            if (!toolCalls[tc.index]) {
-              toolCalls[tc.index] = { id: '', type: 'function', function: { name: '', arguments: '' } };
+      try {
+        const json = JSON.parse(dataStr);
+        const choice = json.choices?.[0];
+
+        // Check for tool calls
+        if (choice?.delta?.tool_calls) {
+          for (const tc of choice.delta.tool_calls) {
+            if (tc.index !== undefined) {
+              if (!toolCalls[tc.index]) {
+                toolCalls[tc.index] = { id: '', type: 'function', function: { name: '', arguments: '' } };
+              }
+              if (tc.id) toolCalls[tc.index].id = tc.id;
+              if (tc.function?.name) toolCalls[tc.index].function.name = tc.function.name;
+              if (tc.function?.arguments) toolCalls[tc.index].function.arguments += tc.function.arguments;
             }
-            if (tc.id) toolCalls[tc.index].id = tc.id;
-            if (tc.function?.name) toolCalls[tc.index].function.name = tc.function.name;
-            if (tc.function?.arguments) toolCalls[tc.index].function.arguments += tc.function.arguments;
           }
+          return null;
         }
+
+        const content = choice?.delta?.content;
+        return content || null;
+      } catch (e) {
         return null;
       }
-
-      const content = choice?.delta?.content;
-      return content || null;
-    } catch (e) {
-      return null;
-    }
-  });
+    });
+  }
 
   // Handle tool calls if any
   if (toolCalls.length > 0 && config && webSearchEnabled) {
@@ -878,21 +890,32 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
           });
 
           if (followUpResponse.ok) {
-            await readStream(followUpResponse, (text) => {
-              fullText += text;
-              onChunk(text);
-            }, (line) => {
-              const trim = line.trim();
-              if (!trim || !trim.startsWith('data: ')) return null;
-              const dataStr = trim.slice(6);
-              if (dataStr === '[DONE]') return null;
-              try {
-                const json = JSON.parse(dataStr);
-                return json.choices?.[0]?.delta?.content || null;
-              } catch {
-                return null;
+            const followUpContentType = followUpResponse.headers.get('content-type') || '';
+            if (followUpContentType.includes('application/json')) {
+              const data = await followUpResponse.json();
+              const choice = data.choices?.[0];
+              const content = choice?.message?.content || choice?.text || '';
+              if (content) {
+                fullText += content;
+                onChunk(content);
               }
-            });
+            } else {
+              await readStream(followUpResponse, (text) => {
+                fullText += text;
+                onChunk(text);
+              }, (line) => {
+                const trim = line.trim();
+                if (!trim || !trim.startsWith('data: ')) return null;
+                const dataStr = trim.slice(6);
+                if (dataStr === '[DONE]') return null;
+                try {
+                  const json = JSON.parse(dataStr);
+                  return json.choices?.[0]?.delta?.content || null;
+                } catch {
+                  return null;
+                }
+              });
+            }
           }
         } catch (e) {
           console.error('Tool call failed:', e);
@@ -954,25 +977,32 @@ const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, m
   }
 
   let fullText = '';
+  const contentType = response.headers.get('content-type') || '';
 
-  await readStream(response, (text) => {
-    fullText += text;
-    onChunk(text);
-  }, (line) => {
-    const trim = line.trim();
-    if (!trim || !trim.startsWith('data: ')) return null;
+  if (contentType.includes('application/json')) {
+    const data = await response.json();
+    fullText = data.content?.[0]?.text || '';
+    if (fullText) onChunk(fullText);
+  } else {
+    await readStream(response, (text) => {
+      fullText += text;
+      onChunk(text);
+    }, (line) => {
+      const trim = line.trim();
+      if (!trim || !trim.startsWith('data: ')) return null;
 
-    const dataStr = trim.slice(6);
-    try {
-      const json = JSON.parse(dataStr);
-      if (json.type === 'content_block_delta' && json.delta?.text) {
-        return json.delta.text;
+      const dataStr = trim.slice(6);
+      try {
+        const json = JSON.parse(dataStr);
+        if (json.type === 'content_block_delta' && json.delta?.text) {
+          return json.delta.text;
+        }
+        return null;
+      } catch {
+        return null;
       }
-      return null;
-    } catch {
-      return null;
-    }
-  });
+    });
+  }
 
   return { text: fullText };
 };
@@ -1022,25 +1052,32 @@ const streamPerplexity = async (apiKey: string, baseUrl: string, model: string, 
   }
 
   let fullText = '';
+  const contentType = response.headers.get('content-type') || '';
 
-  await readStream(response, (text) => {
-    fullText += text;
-    onChunk(text);
-  }, (line) => {
-    const trim = line.trim();
-    if (!trim || !trim.startsWith('data: ')) return null;
+  if (contentType.includes('application/json')) {
+    const data = await response.json();
+    fullText = data.choices?.[0]?.message?.content || '';
+    if (fullText) onChunk(fullText);
+  } else {
+    await readStream(response, (text) => {
+      fullText += text;
+      onChunk(text);
+    }, (line) => {
+      const trim = line.trim();
+      if (!trim || !trim.startsWith('data: ')) return null;
 
-    const dataStr = trim.slice(6);
-    if (dataStr === '[DONE]') return null;
+      const dataStr = trim.slice(6);
+      if (dataStr === '[DONE]') return null;
 
-    try {
-      const json = JSON.parse(dataStr);
-      const content = json.choices?.[0]?.delta?.content;
-      return content || null;
-    } catch (e) {
-      return null;
-    }
-  });
+      try {
+        const json = JSON.parse(dataStr);
+        const content = json.choices?.[0]?.delta?.content;
+        return content || null;
+      } catch (e) {
+        return null;
+      }
+    });
+  }
 
   return { text: fullText };
 };
@@ -1075,6 +1112,14 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
   }
 
   let fullText = '';
+
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    const data = await response.json();
+    fullText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    if (fullText) onChunk(fullText);
+    return { text: fullText };
+  }
 
   // Google returns a JSON array: [ {...}, {...} ] but streamed.
   // It's not SSE. It's just a broken up JSON array.

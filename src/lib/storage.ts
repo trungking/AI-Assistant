@@ -23,8 +23,14 @@ export const setStorage = async (config: AppConfig): Promise<void> => {
 };
 
 export const getSelectedText = async (): Promise<string> => {
+  // If we're in a content script, chrome.tabs won't be available (or full API won't be).
+  // We can just use window.getSelection() directly.
+  if (!chrome.tabs) {
+    return window.getSelection()?.toString() || '';
+  }
+
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab.id) return '';
+  if (!tab?.id) return '';
 
   try {
     const result = await chrome.scripting.executeScript({

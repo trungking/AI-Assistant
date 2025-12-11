@@ -157,49 +157,25 @@ export const openContentPopup = (
     );
 };
 
+import { useAppConfig, useChatState } from '../lib/hooks';
+
 const AppWrapper = ({ config: initialConfig, initialSelection, initialImage, initialInstruction, pendingAutoPrompt, onClose, initialX, initialY }: any) => {
     const [pos, setPos] = useState({ x: initialX, y: initialY });
     const [size, setSize] = useState(initialConfig.popupSize || { width: 450, height: 600 });
-    const [config, setConfig] = useState<AppConfig>(initialConfig);
     const isDragging = useRef(false);
     const dragOffset = useRef({ x: 0, y: 0 });
 
-    const [hydrated, setHydrated] = useState(false);
-    const [chatState, setChatState] = useState({
-        text: initialSelection,
-        image: initialImage,
-        instruction: initialInstruction,
-        messages: [] as any[]
+    const { config, updateConfig } = useAppConfig(initialConfig);
+
+    // Determine if this is a fresh context (explicitly passed props)
+    const hasExplicitContext = !!(initialSelection || initialImage || pendingAutoPrompt);
+
+    const { state, updateState, hydrated } = useChatState({
+        initialText: initialSelection,
+        initialImage: initialImage,
+        initialInstruction: initialInstruction,
+        isFreshContext: hasExplicitContext
     });
-
-    useEffect(() => {
-        const loadState = async () => {
-            // Check for explicit new context - if present, start fresh
-            if (initialSelection || initialImage) {
-                setHydrated(true);
-                return;
-            }
-
-            // Try restore from storage
-            try {
-                const storage = await chrome.storage.local.get('popupState');
-                if (storage.popupState) {
-                    const s = storage.popupState as any;
-                    setChatState({
-                        text: s.selectedText || '',
-                        image: s.selectedImage || null,
-                        instruction: initialInstruction || s.instruction || '',
-                        messages: s.messages || []
-                    });
-                }
-            } catch (e) {
-                console.error('Failed to restore state', e);
-            } finally {
-                setHydrated(true);
-            }
-        };
-        loadState();
-    }, []);
 
     // Theme logic
     const isDark = useTheme(config.theme);
@@ -255,22 +231,11 @@ const AppWrapper = ({ config: initialConfig, initialSelection, initialImage, ini
             const h = containerRef.current.offsetHeight;
             if (w !== config.popupSize?.width || h !== config.popupSize?.height) {
                 const newConfig = { ...config, popupSize: { width: w, height: h } };
-                setStorage(newConfig);
+                // Update persistent config (uses hook's updateConfig which handles storage)
+                updateConfig(newConfig);
                 setSize({ width: w, height: h });
             }
         }
-    };
-
-    const handleStateChange = (state: any) => {
-        // Save to storage same as extension popup
-        const stateToSave = {
-            instruction: state.instruction,
-            messages: state.messages,
-            selectedText: state.selectedText,
-            selectedImage: state.selectedImage,
-            timestamp: Date.now()
-        };
-        chrome.storage.local.set({ popupState: stateToSave });
     };
 
     if (!hydrated) return null;
@@ -320,16 +285,16 @@ const AppWrapper = ({ config: initialConfig, initialSelection, initialImage, ini
                 <div className="w-full h-full flex flex-col active:shadow-none transition-shadow bg-white dark:bg-slate-900 rounded-xl overflow-hidden border-2 border-slate-300 dark:border-slate-500 shadow-sm">
                     <ChatInterface
                         config={config}
-                        initialText={chatState.text}
-                        initialImage={chatState.image}
-                        initialInstruction={chatState.instruction}
-                        initialMessages={chatState.messages}
+                        initialText={state.selectedText}
+                        initialImage={state.selectedImage}
+                        initialInstruction={state.instruction}
+                        initialMessages={state.messages}
                         pendingAutoPrompt={pendingAutoPrompt}
                         onConfigUpdate={(newCfg: AppConfig) => {
-                            setConfig(newCfg);
+                            updateConfig(newCfg);
                             setStorage(newCfg);
                         }}
-                        onStateChange={handleStateChange}
+                        onStateChange={updateState}
                         hideSettings={true}
                     />
                 </div>
