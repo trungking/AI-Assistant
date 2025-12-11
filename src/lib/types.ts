@@ -23,6 +23,7 @@ export interface ChatMessage {
   content: string;
   image?: string; // Data URL
   interrupted?: boolean;
+  responseTime?: number; // Response time in milliseconds
 }
 
 export interface ApiConfig {

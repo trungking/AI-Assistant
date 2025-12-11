@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { type AppConfig, type ChatMessage, type PromptTemplate, type Provider } from '../lib/types';
 import { callApi, fetchModels } from '../lib/api';
-import { Send, Settings, Sparkles, Loader2, User, Bot, Trash2, Zap, Image as ImageIcon, ChevronDown, Check, X, Copy, PauseCircle, SquarePen } from 'lucide-react';
+import { Send, Settings, Sparkles, Loader2, User, Bot, Trash2, Zap, Image as ImageIcon, ChevronDown, Check, X, Copy, PauseCircle, SquarePen, Clock } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
@@ -137,7 +137,25 @@ export default function ChatInterface({
     // Handle auto-execution
     useEffect(() => {
         if (pendingAutoPrompt) {
-            handleSubmit(pendingAutoPrompt.content);
+            // Use initialText (fresh selection) not selectedText (may have stale data)
+            // Also don't auto-submit if there's an existing conversation
+            const hasFreshContext = !!initialText || !!initialImage;
+            const hasExistingConversation = initialMessages && initialMessages.length > 0;
+
+            if (pendingAutoPrompt.immediate && hasFreshContext && !hasExistingConversation) {
+                handleSubmit(pendingAutoPrompt.content);
+            } else {
+                // Just fill the input without auto-submitting
+                // Always strip ${text} placeholder when filling input manually
+                let promptContent = pendingAutoPrompt.content
+                    .replace(/\$\{text\}/g, '')
+                    .replace(/\n\n+/g, '\n\n')
+                    .trim();
+                setInstruction(promptContent);
+                if (textareaRef.current) {
+                    textareaRef.current.focus();
+                }
+            }
         }
     }, [pendingAutoPrompt]);
 
@@ -197,12 +215,46 @@ export default function ChatInterface({
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     };
 
+    // Clear context and immediately persist (bypass debounce)
+    const clearTextContext = () => {
+        setSelectedText('');
+        if (onStateChange) {
+            onStateChange({
+                instruction,
+                messages,
+                selectedText: '',
+                selectedImage
+            });
+        }
+    };
+
+    const clearImageContext = () => {
+        setSelectedImage(null);
+        if (onStateChange) {
+            onStateChange({
+                instruction,
+                messages,
+                selectedText,
+                selectedImage: null
+            });
+        }
+    };
+
     const handlePromptClick = (prompt: PromptTemplate) => {
-        const hasContext = !!selectedText || !!selectedImage;
-        if (prompt.immediate && hasContext) {
+        // Use initialText (fresh selection) not selectedText (may have stale data)
+        // Also don't auto-submit if there's an existing conversation
+        const hasFreshContext = !!initialText || !!initialImage;
+        const hasExistingConversation = messages.length > 0;
+
+        if (prompt.immediate && hasFreshContext && !hasExistingConversation) {
             handleSubmit(prompt.content);
         } else {
-            setInstruction(prompt.content);
+            // Always strip ${text} placeholder when filling input manually
+            let promptContent = prompt.content
+                .replace(/\$\{text\}/g, '')
+                .replace(/\n\n+/g, '\n\n')  // Remove extra newlines
+                .trim();
+            setInstruction(promptContent);
             if (textareaRef.current) {
                 textareaRef.current.focus();
             }
@@ -235,6 +287,9 @@ export default function ChatInterface({
 
         setLoading(true);
         setError('');
+
+        // Track response time
+        const startTime = Date.now();
 
         // Abort previous if any
         if (abortControllerRef.current) {
@@ -291,17 +346,30 @@ export default function ChatInterface({
                 });
             }, abortControllerRef.current.signal);
 
+            // Set response time on completion
+            const responseTime = Date.now() - startTime;
+            setMessages(prev => {
+                const updated = [...prev];
+                const last = updated[updated.length - 1];
+                if (last && last.role === 'assistant') {
+                    last.responseTime = responseTime;
+                }
+                return updated;
+            });
+
             if (res.error) {
                 setError(res.error);
             }
         } catch (err: any) {
             if (err.name === 'AbortError') {
-                // Aborted
+                // Aborted - still record response time for interrupted messages
+                const responseTime = Date.now() - startTime;
                 setMessages(prev => {
                     const updated = [...prev];
                     const last = updated[updated.length - 1];
                     if (last && last.role === 'assistant') {
                         last.interrupted = true;
+                        last.responseTime = responseTime;
                     }
                     return updated;
                 });
@@ -433,7 +501,18 @@ export default function ChatInterface({
                         onClick={() => {
                             setMessages([]);
                             setInstruction('');
+                            setSelectedText('');
+                            setSelectedImage(null);
                             setError('');
+                            // Immediately persist cleared state
+                            if (onStateChange) {
+                                onStateChange({
+                                    instruction: '',
+                                    messages: [],
+                                    selectedText: '',
+                                    selectedImage: null
+                                });
+                            }
                         }}
                         className="text-slate-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 p-2 rounded-lg transition-all duration-200 shrink-0"
                         title="New Chat"
@@ -466,7 +545,10 @@ export default function ChatInterface({
                 {/* Context Badge */}
                 {selectedText && messages.length === 0 && (
                     <div className="bg-blue-50 dark:bg-gpt-sidebar border border-blue-100 dark:border-gpt-hover rounded-xl p-3 mb-4">
-                        <div className="text-[10px] font-bold text-blue-500 dark:text-blue-400 uppercase tracking-wider mb-1">Current Context</div>
+                        <div className="flex justify-between items-start">
+                            <div className="text-[10px] font-bold text-blue-500 dark:text-blue-400 uppercase tracking-wider mb-1">Current Context</div>
+                            <button onClick={clearTextContext} className="text-slate-400 hover:text-red-500 transition-colors" title="Clear context"><X size={14} /></button>
+                        </div>
                         <div className="text-xs text-slate-600 dark:text-gpt-secondary italic line-clamp-3">
                             "{selectedText}"
                         </div>
@@ -478,7 +560,7 @@ export default function ChatInterface({
                     <div className="bg-blue-50 dark:bg-gpt-sidebar border border-blue-100 dark:border-gpt-hover rounded-xl p-3 mb-4">
                         <div className="flex justify-between items-start">
                             <div className="text-[10px] font-bold text-blue-500 dark:text-blue-400 uppercase tracking-wider mb-1">Image Context</div>
-                            <button onClick={() => setSelectedImage(null)} className="text-slate-400 hover:text-red-500"><Trash2 size={14} /></button>
+                            <button onClick={clearImageContext} className="text-slate-400 hover:text-red-500 transition-colors" title="Clear image"><Trash2 size={14} /></button>
                         </div>
                         <img src={selectedImage} alt="Selected Context" className="max-h-32 rounded-lg border border-blue-200 dark:border-gpt-hover object-contain bg-white dark:bg-black" />
                     </div>
@@ -520,6 +602,12 @@ export default function ChatInterface({
                                         <div className="flex items-center gap-1.5 mt-2 text-xs text-slate-400 dark:text-slate-500 italic border-t border-slate-100 dark:border-slate-800 pt-2">
                                             <PauseCircle size={12} />
                                             <span>Stream interrupted</span>
+                                        </div>
+                                    )}
+                                    {msg.responseTime !== undefined && !loading && (
+                                        <div className="flex items-center gap-1 mt-1 text-[10px] text-slate-400 dark:text-slate-500">
+                                            <Clock size={10} />
+                                            <span>{(msg.responseTime / 1000).toFixed(1)}s</span>
                                         </div>
                                     )}
                                 </div>

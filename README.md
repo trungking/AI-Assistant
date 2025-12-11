@@ -4,7 +4,6 @@ A powerful, modern Chrome extension that allows you to instantly process selecte
 
 ![AI Assistant Screenshot](screenshot.png)
 ![AI Assistant Screenshot](screenshot2.png)
-![AI Assistant Screenshot](screenshot3.png)
 
 ## Features
 
