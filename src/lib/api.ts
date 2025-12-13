@@ -31,7 +31,7 @@ interface WebSearchResult {
 }
 
 // Execute web search using Kagi
-const executeKagiWebSearch = async (query: string, kagiSession: string): Promise<WebSearchResult> => {
+const executeKagiWebSearch = async (query: string, kagiSession: string, signal?: AbortSignal): Promise<WebSearchResult> => {
   try {
     // URL encode the query
     const encodedQuery = encodeURIComponent(query).replace(/%20/g, '+');
@@ -47,7 +47,8 @@ const executeKagiWebSearch = async (query: string, kagiSession: string): Promise
         'pragma': 'no-cache',
         'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36',
         'cookie': `kagi_session=${kagiSession}`
-      }
+      },
+      signal
     });
 
     if (!response.ok) {
@@ -68,7 +69,19 @@ const executeKagiWebSearch = async (query: string, kagiSession: string): Promise
         if (trimmedLine.startsWith('new_message.json:')) {
           const jsonStr = trimmedLine.substring('new_message.json:'.length);
           try {
-            const data = JSON.parse(jsonStr);
+            // Attempt to clean trailing garbage if simple parse fails
+            let data;
+            try {
+              data = JSON.parse(jsonStr);
+            } catch (e) {
+              // Try to find the last closing brace
+              const lastBrace = jsonStr.lastIndexOf('}');
+              if (lastBrace !== -1) {
+                data = JSON.parse(jsonStr.substring(0, lastBrace + 1));
+              } else {
+                throw e;
+              }
+            }
 
             if (data.md) {
               content = data.md;
@@ -119,7 +132,7 @@ const executeKagiWebSearch = async (query: string, kagiSession: string): Promise
 };
 
 // Execute web search using Perplexity
-const executePerplexityWebSearch = async (query: string, config: AppConfig): Promise<WebSearchResult> => {
+const executePerplexityWebSearch = async (query: string, config: AppConfig, signal?: AbortSignal): Promise<WebSearchResult> => {
   const perplexityKeys = config.apiKeys['perplexity'];
   if (!perplexityKeys || perplexityKeys.length === 0) {
     return { content: 'Error: No Perplexity API key configured for web search.', sources: [] };
@@ -136,6 +149,7 @@ const executePerplexityWebSearch = async (query: string, config: AppConfig): Pro
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
       },
+      signal,
       body: JSON.stringify({
         model: model,
         messages: [
@@ -190,19 +204,20 @@ const executePerplexityWebSearch = async (query: string, config: AppConfig): Pro
   }
 };
 
-// Execute web search using configured provider (Perplexity or Kagi)
-const executeWebSearch = async (query: string, config: AppConfig): Promise<WebSearchResult> => {
+// Main web search dispatcher
+const executeWebSearch = async (query: string, config: AppConfig, signal?: AbortSignal): Promise<WebSearchResult> => {
   const provider = config.webSearchProvider || 'perplexity';
 
   if (provider === 'kagi') {
-    const kagiSession = config.kagiSession;
-    if (!kagiSession) {
-      return { content: 'Error: No Kagi session cookie configured for web search.', sources: [] };
+    if (config.kagiSession) {
+      return executeKagiWebSearch(query, config.kagiSession, signal);
     }
-    return executeKagiWebSearch(query, kagiSession);
-  } else {
-    return executePerplexityWebSearch(query, config);
+    // Fallback if session missing
+    return { content: 'Error: Kagi session cookie is missing.', sources: [] };
   }
+
+  // Default to Perplexity
+  return executePerplexityWebSearch(query, config, signal);
 };
 
 // Check if web search should be enabled for this request
@@ -945,7 +960,8 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
           }
 
           // Execute web search
-          const searchResult = await executeWebSearch(query, config);
+          if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+          const searchResult = await executeWebSearch(query, config, signal);
 
 
           // Notify UI with search results and sources

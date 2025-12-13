@@ -430,12 +430,18 @@ export default function Options() {
                                         <label className="block text-xs font-semibold text-slate-500 dark:text-gpt-secondary mb-1.5 uppercase tracking-wider">Kagi Session Cookie</label>
                                         <div className="relative">
                                             <input
-                                                type="password"
+                                                type={showKey['kagiSession'] ? "text" : "password"}
                                                 value={config.kagiSession || ''}
                                                 onChange={(e) => saveConfig({ ...config, kagiSession: e.target.value })}
                                                 placeholder="Enter kagi_session cookie value"
-                                                className="w-full px-3 py-2.5 text-sm font-mono bg-slate-50 dark:bg-gpt-input border border-slate-200 dark:border-gpt-hover rounded-lg focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all dark:text-gpt-text"
+                                                className="w-full pl-3 pr-10 py-2.5 text-sm font-mono bg-slate-50 dark:bg-gpt-input border border-slate-200 dark:border-gpt-hover rounded-lg focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all dark:text-gpt-text"
                                             />
+                                            <button
+                                                onClick={() => toggleShowKey('kagiSession')}
+                                                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors"
+                                            >
+                                                {showKey['kagiSession'] ? <EyeOff size={14} /> : <Eye size={14} />}
+                                            </button>
                                         </div>
                                         <p className="text-xs text-slate-400 dark:text-gpt-secondary mt-2">
                                             Get this from your browser's cookies when logged into Kagi. Look for the "kagi_session" cookie value.
