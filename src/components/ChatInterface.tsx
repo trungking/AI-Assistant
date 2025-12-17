@@ -413,13 +413,13 @@ export default function ChatInterface({
                     });
                 }
             }, abortControllerRef.current.signal, (searchStatus) => {
-                if (searchStatus.startNewMessage) {
-                    // Create a new message for the follow-up response
+                if (searchStatus.startNewMessage && !isInNewMessage) {
+                    // Create a new message for the follow-up response (only once)
                     isInNewMessage = true;
                     accumulatedText = ''; // Reset for new message
                     setMessages(prev => {
                         const updated = [...prev];
-                        // Update the previous message with final web search info
+                        // Update the previous message's web search info only (don't touch content)
                         const prevLast = updated[updated.length - 1];
                         if (prevLast && prevLast.role === 'assistant') {
                             prevLast.webSearch = {
@@ -429,11 +429,11 @@ export default function ChatInterface({
                                 sources: searchStatus.sources
                             };
                         }
-                        // Add new assistant message for the follow-up
+                        // Add new assistant message for the follow-up (no webSearch on this one)
                         return [...updated, { role: 'assistant', content: '' }];
                     });
-                } else {
-                    // Just update web search info on current message
+                } else if (!isInNewMessage) {
+                    // Only update web search info if we haven't created a new message yet
                     setMessages(prev => {
                         const updated = [...prev];
                         const last = updated[updated.length - 1];
@@ -448,6 +448,7 @@ export default function ChatInterface({
                         return updated;
                     });
                 }
+                // If isInNewMessage is true and it's not startNewMessage, skip (don't update the new message's webSearch)
             });
 
             if (res.error) {
@@ -737,8 +738,14 @@ export default function ChatInterface({
                                 <div className={clsx("prose prose-sm max-w-none prose-slate dark:prose-invert prose-p:leading-relaxed prose-pre:bg-slate-100 dark:prose-pre:bg-gpt-sidebar prose-pre:p-2 prose-pre:rounded-lg mb-4",
                                     "dark:px-0 dark:py-0 px-1"
                                 )}>
-                                    {/* Response content first - AI announces tool use, then continues after search */}
-                                    {!msg.content && loading && idx === messages.length - 1 && !msg.webSearch?.isSearching ? (
+                                    {/* Response content - show static text for web search messages, Thinking for loading */}
+                                    {!msg.content && msg.webSearch ? (
+                                        // Message has web search but no content - show static text
+                                        <div className="text-sm text-slate-700 dark:text-gpt-text py-1">
+                                            AI is using web search to search for "{msg.webSearch.query}"
+                                        </div>
+                                    ) : !msg.content && loading && idx === messages.length - 1 ? (
+                                        // Empty message at the end while loading - show Thinking
                                         <div className="flex items-center gap-2 text-slate-500 dark:text-gpt-secondary py-1">
                                             <Loader2 size={14} className="animate-spin" />
                                             <span className="text-xs font-medium">Thinking...</span>
@@ -780,69 +787,68 @@ export default function ChatInterface({
                                             {msg.content.replace(/\[\^(\d+)\]/g, '[$1](#source-$1)')}
                                         </ReactMarkdown>
                                     )}
-                                    {/* Web Search Section - shown BELOW the AI's content (after "I'll search for...") */}
+                                    {/* Web Search Section - always shown when webSearch exists */}
                                     {msg.webSearch && (
                                         <div className="mt-3 not-prose">
-                                            {msg.webSearch.isSearching ? (
-                                                <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 rounded-lg border border-blue-200 dark:border-blue-800">
-                                                    <Globe size={14} className="animate-pulse" />
-                                                    <span className="text-xs font-medium">Searching: "{msg.webSearch.query}"...</span>
-                                                    <Loader2 size={12} className="animate-spin ml-auto" />
-                                                </div>
-                                            ) : (
-                                                <div className="border border-slate-200 dark:border-gpt-hover rounded-lg overflow-hidden">
-                                                    <button
-                                                        onClick={() => setExpandedSearches(prev => ({ ...prev, [idx]: !prev[idx] }))}
-                                                        className="w-full flex items-center gap-2 px-3 py-2 bg-slate-50 dark:bg-gpt-sidebar hover:bg-slate-100 dark:hover:bg-gpt-hover transition-colors text-left"
-                                                    >
+                                            <div className="border border-slate-200 dark:border-gpt-hover rounded-lg overflow-hidden">
+                                                <button
+                                                    onClick={() => setExpandedSearches(prev => ({ ...prev, [idx]: !prev[idx] }))}
+                                                    className="w-full flex items-center gap-2 px-3 py-2 bg-slate-50 dark:bg-gpt-sidebar hover:bg-slate-100 dark:hover:bg-gpt-hover transition-colors text-left"
+                                                    disabled={msg.webSearch.isSearching}
+                                                >
+                                                    {msg.webSearch.isSearching ? (
+                                                        <Loader2 size={14} className="animate-spin text-blue-500 shrink-0" />
+                                                    ) : (
                                                         <Globe size={14} className="text-green-500 shrink-0" />
-                                                        <span className="text-xs font-medium text-slate-700 dark:text-gpt-text flex-1 truncate">
-                                                            Web search: "{msg.webSearch.query}"
-                                                        </span>
-                                                        <ChevronRight size={14} className={clsx("text-slate-400 transition-transform", expandedSearches[idx] && "rotate-90")} />
-                                                    </button>
-                                                    {expandedSearches[idx] && (
-                                                        <div className="px-3 py-2 bg-white dark:bg-gpt-main border-t border-slate-200 dark:border-gpt-hover max-h-48 overflow-y-auto custom-scrollbar">
-                                                            <div className="text-xs text-slate-600 dark:text-gpt-secondary">
-                                                                <ReactMarkdown
-                                                                    remarkPlugins={[remarkGfm, remarkBreaks]}
-                                                                    components={{
-                                                                        a: ({ node, ...props }) => {
-                                                                            const href = props.href || '';
-                                                                            if (href.startsWith('#source-')) {
-                                                                                const index = parseInt(href.replace('#source-', ''));
-                                                                                const source = msg.webSearch?.sources?.[index - 1];
-
-                                                                                if (source) {
-                                                                                    return (
-                                                                                        <span className="inline-flex items-center justify-center align-super text-[9px]">
-                                                                                            <a
-                                                                                                href={source.url}
-                                                                                                target="_blank"
-                                                                                                rel="noopener noreferrer"
-                                                                                                className="flex items-center justify-center w-3.5 h-3.5 rounded-full bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-blue-600 hover:text-white dark:hover:bg-blue-500 transition-colors no-underline font-medium mx-0.5"
-                                                                                                title={`${source.title}\n${source.url}`}
-                                                                                                onClick={(e) => {
-                                                                                                    e.stopPropagation();
-                                                                                                }}
-                                                                                            >
-                                                                                                {index}
-                                                                                            </a>
-                                                                                        </span>
-                                                                                    );
-                                                                                }
-                                                                            }
-                                                                            return <a {...props} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline" />;
-                                                                        }
-                                                                    }}
-                                                                >
-                                                                    {msg.webSearch.result.replace(/\[\^(\d+)\]/g, '[$1](#source-$1)')}
-                                                                </ReactMarkdown>
-                                                            </div>
-                                                        </div>
                                                     )}
-                                                </div>
-                                            )}
+                                                    <span className="text-xs font-medium text-slate-700 dark:text-gpt-text flex-1 truncate">
+                                                        {msg.webSearch.isSearching ? `Searching: "${msg.webSearch.query}"...` : `Web search: "${msg.webSearch.query}"`}
+                                                    </span>
+                                                    {!msg.webSearch.isSearching && (
+                                                        <ChevronRight size={14} className={clsx("text-slate-400 transition-transform", expandedSearches[idx] && "rotate-90")} />
+                                                    )}
+                                                </button>
+                                                {!msg.webSearch.isSearching && expandedSearches[idx] && (
+                                                    <div className="px-3 py-2 bg-white dark:bg-gpt-main border-t border-slate-200 dark:border-gpt-hover max-h-48 overflow-y-auto custom-scrollbar">
+                                                        <div className="text-xs text-slate-600 dark:text-gpt-secondary">
+                                                            <ReactMarkdown
+                                                                remarkPlugins={[remarkGfm, remarkBreaks]}
+                                                                components={{
+                                                                    a: ({ node, ...props }) => {
+                                                                        const href = props.href || '';
+                                                                        if (href.startsWith('#source-')) {
+                                                                            const index = parseInt(href.replace('#source-', ''));
+                                                                            const source = msg.webSearch?.sources?.[index - 1];
+
+                                                                            if (source) {
+                                                                                return (
+                                                                                    <span className="inline-flex items-center justify-center align-super text-[9px]">
+                                                                                        <a
+                                                                                            href={source.url}
+                                                                                            target="_blank"
+                                                                                            rel="noopener noreferrer"
+                                                                                            className="flex items-center justify-center w-3.5 h-3.5 rounded-full bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-blue-600 hover:text-white dark:hover:bg-blue-500 transition-colors no-underline font-medium mx-0.5"
+                                                                                            title={`${source.title}\n${source.url}`}
+                                                                                            onClick={(e) => {
+                                                                                                e.stopPropagation();
+                                                                                            }}
+                                                                                        >
+                                                                                            {index}
+                                                                                        </a>
+                                                                                    </span>
+                                                                                );
+                                                                            }
+                                                                        }
+                                                                        return <a {...props} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline" />;
+                                                                    }
+                                                                }}
+                                                            >
+                                                                {msg.webSearch.result.replace(/\[\^(\d+)\]/g, '[$1](#source-$1)')}
+                                                            </ReactMarkdown>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
                                         </div>
                                     )}
                                     {msg.interrupted && (

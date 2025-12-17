@@ -977,7 +977,18 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
       if (toolCall.function.name === 'web_search') {
         try {
           const args = JSON.parse(toolCall.function.arguments);
-          const query = args.query;
+          // Handle both 'query' (string) and 'queries' (array) formats
+          // Some models like Gemini may return 'queries' as an array
+          let query: string;
+          if (args.query) {
+            query = args.query;
+          } else if (args.queries && Array.isArray(args.queries) && args.queries.length > 0) {
+            // Join multiple queries or use the first one
+            query = args.queries[0];
+          } else {
+            console.warn('web_search tool call missing query:', args);
+            continue; // Skip this tool call
+          }
 
           // Notify UI that search is starting
           if (onWebSearch) {
@@ -989,13 +1000,14 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
           const searchResult = await executeWebSearch(query, config, signal);
 
 
-          // Notify UI with search results and sources
+          // Notify UI with search results and sources - signal to start a new message for AI response
           if (onWebSearch) {
             onWebSearch({
               query,
               result: searchResult.content,
               isSearching: false,
-              sources: searchResult.sources
+              sources: searchResult.sources,
+              startNewMessage: true
             });
           }
 
