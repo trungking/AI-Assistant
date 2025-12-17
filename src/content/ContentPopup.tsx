@@ -243,7 +243,10 @@ const AppWrapper = ({ config: initialConfig, initialSelection, initialImage, ini
     return (
         <div
             className={`font-sans text-base ${isDark ? 'dark' : ''}`}
-            style={{ all: 'initial' }}
+            style={{
+                all: 'initial',
+                fontFamily: "'Inter', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji'"
+            }}
         >
             {/* Backdrop */}
             <div

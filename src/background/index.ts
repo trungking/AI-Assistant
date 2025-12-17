@@ -66,11 +66,69 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     if (info.menuItemId === "ai-ask-context" && tab?.id) {
         let selectedText = info.selectionText || '';
 
-        // Try to get better text with newlines via script
+        // Try to get better text with proper emoji extraction via script
         try {
             const results = await chrome.scripting.executeScript({
                 target: { tabId: tab.id },
-                func: () => window.getSelection()?.toString() || ''
+                func: () => {
+                    // Extract text from a DOM node, preserving emoji alt text from img elements
+                    const extractTextFromNode = (node: Node): string => {
+                        if (node.nodeType === Node.TEXT_NODE) {
+                            return node.textContent || '';
+                        }
+
+                        if (node.nodeType === Node.ELEMENT_NODE) {
+                            const element = node as Element;
+
+                            if (element.tagName === 'IMG') {
+                                return (element as HTMLImageElement).alt || '';
+                            }
+
+                            if (element.tagName === 'SCRIPT' || element.tagName === 'STYLE') {
+                                return '';
+                            }
+
+                            let text = '';
+                            for (const child of Array.from(node.childNodes)) {
+                                text += extractTextFromNode(child);
+                            }
+
+                            const blockTags = ['DIV', 'P', 'BR', 'LI', 'TR', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6'];
+                            if (blockTags.includes(element.tagName)) {
+                                text += '\n';
+                            }
+
+                            return text;
+                        }
+
+                        return '';
+                    };
+
+                    const selection = window.getSelection();
+                    if (!selection || selection.rangeCount === 0) {
+                        return '';
+                    }
+
+                    const simpleText = selection.toString();
+
+                    try {
+                        const range = selection.getRangeAt(0);
+                        const fragment = range.cloneContents();
+                        const hasImages = fragment.querySelectorAll('img').length > 0;
+
+                        if (hasImages) {
+                            let extractedText = '';
+                            for (const child of Array.from(fragment.childNodes)) {
+                                extractedText += extractTextFromNode(child);
+                            }
+                            return extractedText.replace(/\n{3,}/g, '\n\n').trim();
+                        }
+                    } catch (e) {
+                        console.warn('Failed to extract rich text:', e);
+                    }
+
+                    return simpleText;
+                }
             });
             if (results[0]?.result) {
                 selectedText = results[0].result;
