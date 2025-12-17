@@ -55,6 +55,16 @@ export const openContentPopup = (
     shadowContainer.style.top = '0';
     // Reset inheritance
     shadowContainer.style.all = 'initial';
+
+    // Stop keyboard events from propagating to the parent page
+    // This prevents sites like GitHub from intercepting keyboard shortcuts
+    const stopKeyboardPropagation = (e: Event) => {
+        e.stopPropagation();
+    };
+    shadowContainer.addEventListener('keydown', stopKeyboardPropagation, true);
+    shadowContainer.addEventListener('keyup', stopKeyboardPropagation, true);
+    shadowContainer.addEventListener('keypress', stopKeyboardPropagation, true);
+
     document.body.appendChild(shadowContainer);
 
     const shadow = shadowContainer.attachShadow({ mode: 'open' });
