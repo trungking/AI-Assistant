@@ -1031,12 +1031,6 @@ export default function ChatInterface({
                                             <span>{msg.webSearch.sources.length} Sources</span>
                                         </button>
                                     )}
-                                    {msg.responseTime !== undefined && (
-                                        <div className="flex items-center gap-1 mt-1 text-[10px] text-slate-400 dark:text-slate-500">
-                                            <Clock size={10} />
-                                            <span>{(msg.responseTime / 1000).toFixed(1)}s</span>
-                                        </div>
-                                    )}
                                 </div>
                             ) : (
                                 <div>
@@ -1070,6 +1064,13 @@ export default function ChatInterface({
                                 >
                                     {copiedIndex === idx ? <Check size={12} className="text-green-500" /> : <Copy size={12} />}
                                 </button>
+                            )}
+                            {/* Response time - shown after copy button */}
+                            {msg.role === 'assistant' && msg.responseTime !== undefined && (
+                                <div className="flex items-center gap-1 mt-2 text-[10px] text-slate-400 dark:text-slate-500">
+                                    <Clock size={10} />
+                                    <span>{(msg.responseTime / 1000).toFixed(1)}s</span>
+                                </div>
                             )}
                         </div>
                     </div>
