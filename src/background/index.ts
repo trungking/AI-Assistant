@@ -227,6 +227,12 @@ chrome.runtime.onConnect.addListener((port) => {
                             try {
                                 port.postMessage({ webSearch });
                             } catch (e) { /* ignore if disconnected */ }
+                        },
+                        (reasoning) => {
+                            // Send reasoning content to content script
+                            try {
+                                port.postMessage({ reasoning });
+                            } catch (e) { /* ignore if disconnected */ }
                         }
                     );
 

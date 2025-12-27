@@ -58,6 +58,10 @@ export default function ChatInterface({
     const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
     const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
     const [expandedSearches, setExpandedSearches] = useState<Record<number, boolean>>({});
+    const [expandedReasoning, setExpandedReasoning] = useState<Record<number, boolean>>({});
+    const [reasoningStartTime, setReasoningStartTime] = useState<Record<number, number>>({});
+    const [reasoningElapsed, setReasoningElapsed] = useState<Record<number, number>>({});
+    const [, forceUpdate] = useState(0); // Force re-render for timer updates
     const [sourcesModal, setSourcesModal] = useState<{ sources: Array<{ title: string; url: string; snippet?: string }>; query: string } | null>(null);
     const [imageZoomOpen, setImageZoomOpen] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -68,6 +72,9 @@ export default function ChatInterface({
 
     // Abort controller for streaming
     const abortControllerRef = useRef<AbortController | null>(null);
+
+    // Ref for reasoning start times (for synchronous access)
+    const reasoningStartTimeRef = useRef<Record<number, number>>({});
 
     // Refs for cleanup state access
     const messagesRef = useRef(messages);
@@ -95,6 +102,13 @@ export default function ChatInterface({
                 const lastMsg = currentMsgs[currentMsgs.length - 1];
                 if (lastMsg && lastMsg.role === 'assistant') {
                     lastMsg.interrupted = true;
+
+                    // Calculate and save reasoning time if reasoning was happening
+                    const msgIndex = currentMsgs.length - 1;
+                    if (reasoningStartTimeRef.current[msgIndex]) {
+                        const finalElapsed = Math.floor((Date.now() - reasoningStartTimeRef.current[msgIndex]) / 1000);
+                        lastMsg.reasoningTime = finalElapsed;
+                    }
                 }
 
                 // Force save state
@@ -145,6 +159,21 @@ export default function ChatInterface({
             setInstruction(initialInstruction);
         }
     }, [initialInstruction]);
+
+    // Initialize reasoning elapsed times from saved messages
+    useEffect(() => {
+        if (initialMessages.length > 0) {
+            const elapsed: Record<number, number> = {};
+            initialMessages.forEach((msg, idx) => {
+                if (msg.reasoningTime !== undefined) {
+                    elapsed[idx] = msg.reasoningTime;
+                }
+            });
+            if (Object.keys(elapsed).length > 0) {
+                setReasoningElapsed(elapsed);
+            }
+        }
+    }, [initialMessages]);
 
     // Handle auto-execution
     useEffect(() => {
@@ -241,6 +270,22 @@ export default function ChatInterface({
         }, 100);
         return () => clearTimeout(timer);
     }, []);
+
+    // Force update every second for timer display
+    useEffect(() => {
+        const interval = setInterval(() => {
+            // Check if any message has active reasoning
+            const hasActiveReasoning = messages.some((msg, idx) =>
+                msg.reasoning && !msg.interrupted && reasoningStartTime[idx]
+            );
+            if (hasActiveReasoning) {
+                forceUpdate(prev => prev + 1);
+            }
+        }, 1000);
+
+        return () => clearInterval(interval);
+    }, [messages, reasoningStartTime]);
+
 
     const scrollToBottom = () => {
         // Use setTimeout to ensure DOM has updated
@@ -401,6 +446,7 @@ export default function ChatInterface({
         scrollToBottom();
 
         let accumulatedText = '';
+        let accumulatedReasoning = '';
         let isInNewMessage = false;
 
         try {
@@ -437,6 +483,7 @@ export default function ChatInterface({
                     // Create a new message for the follow-up response (only once)
                     isInNewMessage = true;
                     accumulatedText = ''; // Reset for new message
+                    accumulatedReasoning = ''; // Reset reasoning for new message
                     setMessages(prev => {
                         const updated = [...prev];
                         // Update the previous message's web search info only (don't touch content)
@@ -469,6 +516,26 @@ export default function ChatInterface({
                     });
                 }
                 // If isInNewMessage is true and it's not startNewMessage, skip (don't update the new message's webSearch)
+            }, (reasoningChunk) => {
+                // Handle reasoning content (from models like DeepSeek)
+                accumulatedReasoning += reasoningChunk;
+                const msgIndex = newMessages.length; // Index of the assistant message
+
+                // Start timer when first reasoning chunk arrives
+                if (accumulatedReasoning === reasoningChunk) {
+                    const startTime = Date.now();
+                    reasoningStartTimeRef.current[msgIndex] = startTime;
+                    setReasoningStartTime(prev => ({ ...prev, [msgIndex]: startTime }));
+                }
+
+                setMessages(prev => {
+                    const updated = [...prev];
+                    const last = updated[updated.length - 1];
+                    if (last && last.role === 'assistant') {
+                        last.reasoning = accumulatedReasoning;
+                    }
+                    return updated;
+                });
             });
 
             if (res.error) {
@@ -478,15 +545,35 @@ export default function ChatInterface({
             if (err.name === 'AbortError') {
                 // Aborted - still record response time for interrupted messages
                 const responseTime = Date.now() - startTime;
-                setMessages(prev => {
-                    const updated = [...prev];
-                    const last = updated[updated.length - 1];
-                    if (last && last.role === 'assistant') {
-                        last.interrupted = true;
-                        last.responseTime = responseTime;
-                    }
-                    return updated;
-                });
+                const msgIndex = newMessages.length;
+
+                // Calculate and store final reasoning time if reasoning was happening
+                if (reasoningStartTimeRef.current[msgIndex]) {
+                    const finalElapsed = Math.floor((Date.now() - reasoningStartTimeRef.current[msgIndex]) / 1000);
+                    setReasoningElapsed(prev => ({ ...prev, [msgIndex]: finalElapsed }));
+
+                    // Also save to the message itself for persistence
+                    setMessages(prev => {
+                        const updated = [...prev];
+                        const last = updated[updated.length - 1];
+                        if (last && last.role === 'assistant') {
+                            last.interrupted = true;
+                            last.responseTime = responseTime;
+                            last.reasoningTime = finalElapsed;
+                        }
+                        return updated;
+                    });
+                } else {
+                    setMessages(prev => {
+                        const updated = [...prev];
+                        const last = updated[updated.length - 1];
+                        if (last && last.role === 'assistant') {
+                            last.interrupted = true;
+                            last.responseTime = responseTime;
+                        }
+                        return updated;
+                    });
+                }
             } else {
                 setError(err.message);
             }
@@ -758,14 +845,71 @@ export default function ChatInterface({
                                 <div className={clsx("prose prose-sm max-w-none prose-slate dark:prose-invert prose-p:leading-relaxed prose-pre:bg-slate-100 dark:prose-pre:bg-gpt-sidebar prose-pre:p-2 prose-pre:rounded-lg mb-4",
                                     "dark:px-0 dark:py-0 px-1"
                                 )}>
+                                    {/* Reasoning Section - shown when reasoning content exists */}
+                                    {msg.reasoning && (
+                                        <div className="mb-2 not-prose">
+                                            <button
+                                                onClick={() => {
+                                                    const isExpanded = expandedReasoning[idx] ?? config.alwaysExpandReasoning ?? false;
+                                                    setExpandedReasoning(prev => ({ ...prev, [idx]: !isExpanded }));
+                                                }}
+                                                className="flex items-center gap-2 text-sm font-medium text-slate-500 dark:text-gpt-secondary hover:text-slate-700 dark:hover:text-gpt-text transition-colors w-full group py-1 text-left"
+                                            >
+                                                {loading && idx === messages.length - 1 && !msg.content ? (
+                                                    <Loader2 size={14} className="animate-spin text-blue-500 shrink-0" />
+                                                ) : (
+                                                    <Sparkles size={14} className="text-blue-500 shrink-0" />
+                                                )}
+                                                <span className="truncate flex-1">
+                                                    {(() => {
+                                                        const lastStep = msg.reasoning?.match(/(?:^|\n)\*\*([^\*]+)\*\*/g)?.pop()?.replace(/[\n\*]/g, '').trim();
+                                                        if (lastStep) return <span className="text-slate-700 dark:text-gray-300">{lastStep}</span>;
+                                                        return loading && idx === messages.length - 1 && !msg.content ? 'Reasoning...' : 'Reasoning';
+                                                    })()}
+                                                </span>
+                                                <div className="opacity-50 group-hover:opacity-100 transition-opacity">
+                                                    {(expandedReasoning[idx] ?? config.alwaysExpandReasoning ?? false) ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                                                </div>
+                                            </button>
+
+                                            {(expandedReasoning[idx] ?? config.alwaysExpandReasoning ?? false) && (
+                                                <div className="mt-1 pl-3 border-l-2 border-slate-200 dark:border-slate-700 ml-1.5">
+                                                    <div className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed max-h-[30vh] overflow-y-auto custom-scrollbar">
+                                                        <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>
+                                                            {msg.reasoning.replace(/(\*\*[^\*]+\*\*)\n(?!\n)/g, '$1\n\n')}
+                                                        </ReactMarkdown>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-500 ml-1.5">
+                                                Reasoning for {(() => {
+                                                    // First, check if message has stored reasoningTime (for persistence)
+                                                    if (msg.reasoningTime !== undefined) {
+                                                        return msg.reasoningTime;
+                                                    }
+                                                    // If interrupted, show stored final time from state
+                                                    if (msg.interrupted && reasoningElapsed[idx] !== undefined) {
+                                                        return reasoningElapsed[idx];
+                                                    }
+                                                    // If still processing, calculate real-time
+                                                    if (reasoningStartTime[idx]) {
+                                                        return Math.floor((Date.now() - reasoningStartTime[idx]) / 1000);
+                                                    }
+                                                    // Fallback
+                                                    return 0;
+                                                })()} seconds
+                                            </div>
+                                        </div>
+                                    )}
                                     {/* Response content - show static text for web search messages, Thinking for loading */}
                                     {!msg.content && msg.webSearch ? (
                                         // Message has web search but no content - show static text
                                         <div className="text-sm text-slate-700 dark:text-gpt-text py-1">
                                             AI is using web search to search for "{msg.webSearch.query}"
                                         </div>
-                                    ) : !msg.content && loading && idx === messages.length - 1 ? (
-                                        // Empty message at the end while loading - show Thinking
+                                    ) : !msg.content && loading && idx === messages.length - 1 && !msg.reasoning ? (
+                                        // Empty message at the end while loading (and no reasoning) - show Thinking
                                         <div className="flex items-center gap-2 text-slate-500 dark:text-gpt-secondary py-1">
                                             <Loader2 size={14} className="animate-spin" />
                                             <span className="text-xs font-medium">Thinking...</span>
@@ -909,21 +1053,24 @@ export default function ChatInterface({
                                     <div className="whitespace-pre-wrap">{msg.content}</div>
                                 </div>
                             )}
-                            <button
-                                onClick={() => {
-                                    navigator.clipboard.writeText(msg.content);
-                                    setCopiedIndex(idx);
-                                    setTimeout(() => setCopiedIndex(null), 2000);
-                                }}
-                                className={clsx(
-                                    "absolute bottom-1 right-1 p-1 rounded-md transition-all duration-200",
-                                    "opacity-0 group-hover:opacity-100 focus:opacity-100",
-                                    "hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
-                                )}
-                                title="Copy"
-                            >
-                                {copiedIndex === idx ? <Check size={12} className="text-green-500" /> : <Copy size={12} />}
-                            </button>
+                            {/* Only show copy button when response is complete */}
+                            {!(loading && idx === messages.length - 1) && msg.content && (
+                                <button
+                                    onClick={() => {
+                                        navigator.clipboard.writeText(msg.content);
+                                        setCopiedIndex(idx);
+                                        setTimeout(() => setCopiedIndex(null), 2000);
+                                    }}
+                                    className={clsx(
+                                        "absolute bottom-1 right-1 p-1 rounded-md transition-all duration-200",
+                                        "opacity-0 group-hover:opacity-100 focus:opacity-100",
+                                        "hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                                    )}
+                                    title="Copy"
+                                >
+                                    {copiedIndex === idx ? <Check size={12} className="text-green-500" /> : <Copy size={12} />}
+                                </button>
+                            )}
                         </div>
                     </div>
                 ))}

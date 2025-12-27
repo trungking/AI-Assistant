@@ -557,7 +557,8 @@ export const executeApiStream = async (
   config: AppConfig,
   onChunk: (text: string) => void,
   signal?: AbortSignal,
-  onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void
+  onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void,
+  onReasoning?: (text: string) => void
 ): Promise<ApiResponse> => {
   const provider = config.selectedProvider;
   const apiKeys = config.apiKeys[provider];
@@ -580,20 +581,20 @@ export const executeApiStream = async (
     let result: ApiResponse;
     switch (provider) {
       case 'google':
-        result = await streamGoogle(apiKey, baseUrl, model, messages, onChunk, signal, config, onWebSearch);
+        result = await streamGoogle(apiKey, baseUrl, model, messages, onChunk, signal, config, onWebSearch, onReasoning);
         break;
       case 'openai':
       case 'openrouter':
-        result = await streamOpenAI(apiKey, baseUrl, model, messages, onChunk, provider === 'openrouter', signal, config, onWebSearch);
+        result = await streamOpenAI(apiKey, baseUrl, model, messages, onChunk, provider === 'openrouter', signal, config, onWebSearch, onReasoning);
         break;
       case 'anthropic':
-        result = await streamAnthropic(apiKey, baseUrl, model, messages, onChunk, signal, config);
+        result = await streamAnthropic(apiKey, baseUrl, model, messages, onChunk, signal, config, onReasoning);
         break;
       case 'perplexity':
-        result = await streamPerplexity(apiKey, baseUrl, model, messages, onChunk, signal);
+        result = await streamPerplexity(apiKey, baseUrl, model, messages, onChunk, signal, onReasoning);
         break;
       default:
-        result = await streamOpenAI(apiKey, baseUrl, model, messages, onChunk, false, signal, config, onWebSearch);
+        result = await streamOpenAI(apiKey, baseUrl, model, messages, onChunk, false, signal, config, onWebSearch, onReasoning);
     }
 
     // Check if response indicates quota exhaustion
@@ -618,7 +619,8 @@ export const callApi = async (
   config: AppConfig,
   onChunk?: (text: string) => void,
   signal?: AbortSignal,
-  onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void
+  onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void,
+  onReasoning?: (text: string) => void
 ): Promise<ApiResponse> => {
   // Check context
   if (window.location.protocol.startsWith('http')) {
@@ -645,6 +647,9 @@ export const callApi = async (
           } else if (msg.chunk) {
             fullText += msg.chunk;
             onChunk(msg.chunk);
+          } else if (msg.reasoning && onReasoning) {
+            // Handle reasoning content from background
+            onReasoning(msg.reasoning);
           } else if (msg.webSearch && onWebSearch) {
             // Handle web search status from background
             onWebSearch(msg.webSearch);
@@ -662,7 +667,7 @@ export const callApi = async (
   } else {
     // Extension Context -> Direct Call
     if (onChunk) {
-      return executeApiStream(messages, config, onChunk, signal, onWebSearch);
+      return executeApiStream(messages, config, onChunk, signal, onWebSearch, onReasoning);
     } else {
       return executeApiCall(messages, config);
     }
@@ -985,7 +990,7 @@ const readStream = async (response: Response, onChunk: (text: string) => void, p
   }
 };
 
-const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, isOpenRouter = false, signal?: AbortSignal, config?: AppConfig, onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void): Promise<ApiResponse> => {
+const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, isOpenRouter = false, signal?: AbortSignal, config?: AppConfig, onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void, onReasoning?: (text: string) => void): Promise<ApiResponse> => {
   const url = `${baseUrl}/chat/completions`;
 
   const msgs = messages.map(m => {
@@ -1028,12 +1033,12 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
   // Detect web search configuration early to conditionally add instructions
   const webSearchEnabled = config && shouldEnableWebSearch(config, model);
   const isGeminiModel = /^gemini-\d+/.test(model);
-  const useNativeGoogleSearch = webSearchEnabled && 
-    config?.webSearchProvider === 'google' && 
+  const useNativeGoogleSearch = webSearchEnabled &&
+    config?.webSearchProvider === 'google' &&
     isGeminiModel;
 
   // Only add web search instructions for OpenAI-format tool, not for native google_search
-const webSearchInstruction = (!useNativeGoogleSearch && webSearchEnabled) 
+  const webSearchInstruction = (!useNativeGoogleSearch && webSearchEnabled)
     ? ' The web search tool retrieves real-time information. When searching for current status (e.g. "price now", "latest news"), do NOT unnecessarily append the current month/year to the query, as this may limit results. Trust the search tool to provide the latest data. Only specify dates if searching for historical information or specific future projections. If you decide to use the web search tool, you should briefly explain what you are going to search for before calling the tool.'
     : '';
 
@@ -1156,6 +1161,12 @@ const webSearchInstruction = (!useNativeGoogleSearch && webSearchEnabled)
               }
             });
           }
+        }
+
+        // Handle reasoning_content (used by models like DeepSeek)
+        const reasoningContent = choice?.delta?.reasoning_content;
+        if (reasoningContent && onReasoning) {
+          onReasoning(reasoningContent);
         }
 
         const content = choice?.delta?.content;
@@ -1309,7 +1320,7 @@ const webSearchInstruction = (!useNativeGoogleSearch && webSearchEnabled)
   return { text: fullText };
 };
 
-const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, signal?: AbortSignal, _config?: AppConfig): Promise<ApiResponse> => {
+const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, signal?: AbortSignal, _config?: AppConfig, _onReasoning?: (text: string) => void): Promise<ApiResponse> => {
   const url = `${baseUrl}/messages`;
 
   const systemMessage = messages.find(m => m.role === 'system');
@@ -1387,7 +1398,7 @@ const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, m
 };
 
 // Streaming for Perplexity (OpenAI compatible SSE format)
-const streamPerplexity = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, signal?: AbortSignal): Promise<ApiResponse> => {
+const streamPerplexity = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, signal?: AbortSignal, _onReasoning?: (text: string) => void): Promise<ApiResponse> => {
   const url = `${baseUrl}/chat/completions`;
 
   const msgs = messages.map(m => {
@@ -1461,7 +1472,7 @@ const streamPerplexity = async (apiKey: string, baseUrl: string, model: string, 
   return { text: fullText };
 };
 
-const streamGoogle = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, signal?: AbortSignal, config?: AppConfig, onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void): Promise<ApiResponse> => {
+const streamGoogle = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, signal?: AbortSignal, config?: AppConfig, onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void, _onReasoning?: (text: string) => void): Promise<ApiResponse> => {
   // API: POST https://.../streamGenerateContent?key=...
   const url = `${baseUrl}/models/${model}:streamGenerateContent?key=${apiKey}`;
 

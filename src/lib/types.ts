@@ -24,6 +24,8 @@ export interface ChatMessage {
   image?: string; // Data URL
   interrupted?: boolean;
   responseTime?: number; // Response time in milliseconds
+  reasoning?: string; // Reasoning/thinking content from models like DeepSeek
+  reasoningTime?: number; // Reasoning time in seconds (persisted when interrupted)
   webSearch?: {
     query: string;
     result: string;
@@ -62,8 +64,9 @@ export interface AppConfig {
   popupMode?: 'extension' | 'content_script';
   popupSize?: { width: number; height: number };
   enableWebSearch?: boolean; // Enable web search tool
-  webSearchProvider?: 'perplexity' | 'kagi' | 'google'; // Which provider to use for web search
+  webSearchProvider: 'perplexity' | 'kagi' | 'google'; // Which provider to use for web search
   kagiSession?: string; // Kagi session cookie for web search
+  alwaysExpandReasoning?: boolean; // Always expand reasoning content
 }
 
 export const DEFAULT_PROMPTS: PromptTemplate[] = [
@@ -104,5 +107,6 @@ export const DEFAULT_CONFIG: AppConfig = {
   popupMode: 'content_script',
   popupSize: { width: 450, height: 600 },
   webSearchProvider: 'perplexity',
-  kagiSession: ''
+  kagiSession: '',
+  alwaysExpandReasoning: false
 };

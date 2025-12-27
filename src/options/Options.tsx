@@ -379,6 +379,25 @@ export default function Options() {
                                     </div>
                                 </div>
                             </div>
+                            <div className="max-w-md mt-6">
+                                <label className="flex items-center justify-between cursor-pointer group">
+                                    <div>
+                                        <span className="text-sm font-medium text-slate-700 dark:text-gpt-text group-hover:text-slate-900 dark:group-hover:text-white transition-colors">Always expand reasoning</span>
+                                        <p className="text-xs text-slate-400 dark:text-gpt-secondary mt-1">
+                                            Automatically show the full reasoning process when available.
+                                        </p>
+                                    </div>
+                                    <div className="relative ml-4">
+                                        <input
+                                            type="checkbox"
+                                            checked={!!config.alwaysExpandReasoning}
+                                            onChange={(e) => saveConfig({ ...config, alwaysExpandReasoning: e.target.checked })}
+                                            className="sr-only peer"
+                                        />
+                                        <div className="w-11 h-6 bg-slate-200 dark:bg-gpt-input peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                                    </div>
+                                </label>
+                            </div>
                         </div>
 
                         <div className="bg-white dark:bg-gpt-sidebar rounded-2xl shadow-sm border border-slate-200 dark:border-gpt-hover p-6">
