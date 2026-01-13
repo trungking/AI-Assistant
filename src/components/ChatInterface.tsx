@@ -298,8 +298,8 @@ export default function ChatInterface({
     // Force update every second for timer display
     useEffect(() => {
         const interval = setInterval(() => {
-            // Check if any message has active reasoning
-            const hasActiveReasoning = messages.some((msg, idx) =>
+            // Check if any message has active reasoning AND we're still loading
+            const hasActiveReasoning = loading && messages.some((msg, idx) =>
                 msg.reasoning && !msg.interrupted && reasoningStartTime[idx]
             );
             if (hasActiveReasoning) {
@@ -308,7 +308,34 @@ export default function ChatInterface({
         }, 1000);
 
         return () => clearInterval(interval);
-    }, [messages, reasoningStartTime]);
+    }, [messages, reasoningStartTime, loading]);
+
+    // When loading completes, finalize reasoning times for all messages with active timers
+    useEffect(() => {
+        if (!loading) {
+            // Save final reasoning elapsed times for any messages with active timers
+            Object.keys(reasoningStartTime).forEach(idxStr => {
+                const idx = parseInt(idxStr);
+                if (reasoningStartTime[idx] && !reasoningElapsed[idx]) {
+                    const finalElapsed = Math.floor((Date.now() - reasoningStartTime[idx]) / 1000);
+                    setReasoningElapsed(prev => ({ ...prev, [idx]: finalElapsed }));
+
+                    // Also update the message itself for persistence
+                    setMessages(prev => {
+                        const updated = [...prev];
+                        if (updated[idx] && updated[idx].role === 'assistant' && updated[idx].reasoning) {
+                            updated[idx].reasoningTime = finalElapsed;
+                        }
+                        return updated;
+                    });
+                }
+            });
+
+            // Clear start times after saving (keep refs clean)
+            setReasoningStartTime({});
+            reasoningStartTimeRef.current = {};
+        }
+    }, [loading]);
 
 
     const scrollToBottom = () => {
@@ -477,9 +504,37 @@ export default function ChatInterface({
         let accumulatedText = '';
         let accumulatedReasoning = '';
         let isInNewMessage = false;
+        let reasoningFinalized = false;
+
+        // Helper to finalize reasoning timer when content starts
+        const finalizeReasoningTimer = (msgIndex: number) => {
+            if (!reasoningFinalized && accumulatedReasoning && reasoningStartTimeRef.current[msgIndex]) {
+                reasoningFinalized = true;
+                const finalElapsed = Math.floor((Date.now() - reasoningStartTimeRef.current[msgIndex]) / 1000);
+                setReasoningElapsed(prev => ({ ...prev, [msgIndex]: finalElapsed }));
+
+                setMessages(prev => {
+                    const updated = [...prev];
+                    if (updated[msgIndex] && updated[msgIndex].role === 'assistant') {
+                        updated[msgIndex].reasoningTime = finalElapsed;
+                    }
+                    return updated;
+                });
+
+                delete reasoningStartTimeRef.current[msgIndex];
+                setReasoningStartTime(prev => {
+                    const newState = { ...prev };
+                    delete newState[msgIndex];
+                    return newState;
+                });
+            }
+        };
 
         try {
             const res = await callApi(newMessages, tempConfig, (chunk) => {
+                const msgIndex = newMessages.length;
+                finalizeReasoningTimer(msgIndex);
+
                 if (isInNewMessage) {
                     // Append to the new (follow-up) message
                     accumulatedText += chunk;
@@ -682,9 +737,41 @@ export default function ChatInterface({
         let accumulatedText = '';
         let accumulatedReasoning = '';
         let isInNewMessage = false;
+        let reasoningFinalized = false; // Track if we've stopped the reasoning timer
+
+        // Helper to finalize reasoning timer when content starts
+        const finalizeReasoningTimer = (msgIndex: number) => {
+            if (!reasoningFinalized && accumulatedReasoning && reasoningStartTimeRef.current[msgIndex]) {
+                reasoningFinalized = true;
+                const finalElapsed = Math.floor((Date.now() - reasoningStartTimeRef.current[msgIndex]) / 1000);
+                setReasoningElapsed(prev => ({ ...prev, [msgIndex]: finalElapsed }));
+
+                // Update message with final reasoning time
+                setMessages(prev => {
+                    const updated = [...prev];
+                    if (updated[msgIndex] && updated[msgIndex].role === 'assistant') {
+                        updated[msgIndex].reasoningTime = finalElapsed;
+                    }
+                    return updated;
+                });
+
+                // Clear the start time for this message
+                delete reasoningStartTimeRef.current[msgIndex];
+                setReasoningStartTime(prev => {
+                    const newState = { ...prev };
+                    delete newState[msgIndex];
+                    return newState;
+                });
+            }
+        };
 
         try {
             const res = await callApi(newMessages, activeConfig, (chunk) => {
+                const msgIndex = newMessages.length; // Index of the assistant message
+
+                // Finalize reasoning timer on first content chunk
+                finalizeReasoningTimer(msgIndex);
+
                 if (isInNewMessage) {
                     // Append to the new (follow-up) message
                     accumulatedText += chunk;
@@ -1532,7 +1619,7 @@ export default function ChatInterface({
                         value={instruction}
                         onChange={(e) => setInstruction(e.target.value)}
                         placeholder={messages.length === 0 ? (selectedText ? "What should I do with the selected text?" : "Type a message...") : "Reply to continue chat..."}
-                        className="w-full bg-transparent border-none focus:ring-0 p-0 pr-10 text-sm text-slate-900 dark:text-gpt-text placeholder:text-slate-400 dark:placeholder:text-zinc-500 resize-none max-h-[200px] min-h-[44px] overflow-y-auto no-scrollbar outline-none"
+                        className="w-full bg-transparent border-none focus:ring-0 p-0 pr-10 text-sm text-slate-900 dark:text-gpt-text placeholder:text-slate-400 dark:placeholder:text-zinc-500 resize-none max-h-[200px] min-h-[20px] overflow-y-auto no-scrollbar outline-none"
                         rows={1}
                         onKeyDown={(e) => {
                             if (e.key === 'Enter' && !e.shiftKey) {
