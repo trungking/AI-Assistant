@@ -1073,6 +1073,10 @@ export default function ChatInterface({
                                     selectedImage: null
                                 });
                             }
+                            // Focus the textarea for immediate typing
+                            setTimeout(() => {
+                                textareaRef.current?.focus();
+                            }, 50);
                         }}
                         className="text-slate-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 p-2 rounded-lg transition-all duration-200 shrink-0"
                         title="New Chat"
