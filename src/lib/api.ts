@@ -54,6 +54,27 @@ const GOOGLE_SEARCH_TOOL = {
   google_search: {}
 };
 
+/**
+ * Sanitize ChatMessage array for API consumption.
+ * Removes UI-only fields and filters out empty assistant messages.
+ */
+const sanitizeMessagesForApi = (messages: ChatMessage[]): Array<{ role: string; content: string; image?: string }> => {
+  return messages
+    // Filter out empty assistant messages (created during web search flow)
+    .filter(m => !(m.role === 'assistant' && !m.content))
+    // Keep only API-relevant fields
+    .map(m => {
+      const sanitized: { role: string; content: string; image?: string } = {
+        role: m.role,
+        content: m.content
+      };
+      if (m.image) {
+        sanitized.image = m.image;
+      }
+      return sanitized;
+    });
+};
+
 // Execute web search using Perplexity or Kagi
 interface WebSearchResult {
   content: string;
@@ -819,8 +840,11 @@ const callOpenAI = async (apiKey: string, baseUrl: string, model: string, messag
 const callAnthropic = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[]): Promise<ApiResponse> => {
   const url = `${baseUrl}/messages`;
 
-  const systemMessage = messages.find(m => m.role === 'system');
-  const chatMessages = messages.filter(m => m.role !== 'system').map(m => {
+  // Sanitize messages to remove UI-only fields and filter empty messages
+  const sanitizedMessages = sanitizeMessagesForApi(messages);
+
+  const systemMessage = sanitizedMessages.find(m => m.role === 'system');
+  const chatMessages = sanitizedMessages.filter(m => m.role !== 'system').map(m => {
     if (m.image) {
       const [meta, data] = m.image.split(',');
       const mimeType = meta.split(':')[1].split(';')[0];
@@ -832,7 +856,7 @@ const callAnthropic = async (apiKey: string, baseUrl: string, model: string, mes
         ]
       };
     }
-    return m;
+    return { role: m.role, content: m.content };
   });
 
   const body: any = {
@@ -868,7 +892,10 @@ const callOpenRouter = async (apiKey: string, baseUrl: string, model: string, me
   // OpenRouter is OpenAI compatible
   const url = `${baseUrl}/chat/completions`;
 
-  const msgs = messages.map(m => {
+  // Sanitize messages to remove UI-only fields and filter empty messages
+  const sanitizedMessages = sanitizeMessagesForApi(messages);
+
+  const msgs = sanitizedMessages.map(m => {
     if (m.image) {
       return {
         role: m.role,
@@ -878,7 +905,7 @@ const callOpenRouter = async (apiKey: string, baseUrl: string, model: string, me
         ]
       };
     }
-    return m;
+    return { role: m.role, content: m.content };
   });
 
   const response = await fetch(url, {
@@ -909,7 +936,10 @@ const callOpenRouter = async (apiKey: string, baseUrl: string, model: string, me
 const callPerplexity = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[]): Promise<ApiResponse> => {
   const url = `${baseUrl}/chat/completions`;
 
-  const msgs = messages.map(m => {
+  // Sanitize messages to remove UI-only fields and filter empty messages
+  const sanitizedMessages = sanitizeMessagesForApi(messages);
+
+  const msgs = sanitizedMessages.map(m => {
     if (m.image) {
       return {
         role: m.role,
@@ -993,7 +1023,10 @@ const readStream = async (response: Response, onChunk: (text: string) => void, p
 const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, isOpenRouter = false, signal?: AbortSignal, config?: AppConfig, onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void, onReasoning?: (text: string) => void): Promise<ApiResponse> => {
   const url = `${baseUrl}/chat/completions`;
 
-  const msgs = messages.map(m => {
+  // Sanitize messages to remove UI-only fields and filter empty messages
+  const sanitizedMessages = sanitizeMessagesForApi(messages);
+
+  const msgs = sanitizedMessages.map(m => {
     if (m.image) {
       return {
         role: m.role,
@@ -1003,7 +1036,7 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
         ]
       };
     }
-    return m;
+    return { role: m.role, content: m.content };
   });
 
   const headers: Record<string, string> = {
@@ -1187,85 +1220,44 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
     });
   }
 
-  // Handle tool calls if any
+  // Handle tool calls recursively - AI may request multiple web searches in sequence
   if (toolCalls.length > 0 && config && webSearchEnabled) {
-    for (const toolCall of toolCalls) {
-      if (toolCall.function.name === 'web_search') {
-        try {
-          const args = JSON.parse(toolCall.function.arguments);
-          // Handle both 'query' (string) and 'queries' (array) formats
-          // Some models like Gemini may return 'queries' as an array
-          let query: string;
-          if (args.query) {
-            query = args.query;
-          } else if (args.queries && Array.isArray(args.queries) && args.queries.length > 0) {
-            // Join multiple queries or use the first one
-            query = args.queries[0];
-          } else {
-            console.warn('web_search tool call missing query:', args);
-            continue; // Skip this tool call
-          }
+    let currentToolCalls = toolCalls;
+    let currentMessages = msgsWithTime;
+    let currentFullText = fullText;
+    const MAX_TOOL_ITERATIONS = 5; // Prevent infinite loops
+    let iteration = 0;
 
-          // Notify UI that search is starting
-          if (onWebSearch) {
-            onWebSearch({ query, isSearching: true });
-          }
+    while (currentToolCalls.length > 0 && iteration < MAX_TOOL_ITERATIONS) {
+      iteration++;
 
-          // Execute web search
-          if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-          const searchResult = await executeWebSearch(query, config, signal);
-
-
-          // Notify UI with search results and sources - signal to start a new message for AI response
-          if (onWebSearch) {
-            onWebSearch({
-              query,
-              result: searchResult.content,
-              isSearching: false,
-              sources: searchResult.sources,
-              startNewMessage: true
-            });
-          }
-
-          // Build follow-up messages with tool result
-          // Add explicit instruction to use the search results
-          const searchInstruction = `Based on the web search results above, provide an accurate and up-to-date answer. The search results contain current information - use this data to answer the user's question. Do not rely on your training data if it conflicts with the search results.`;
-
-          const followUpMessages: any[] = [
-            ...msgsWithTime,
-            {
-              role: 'assistant',
-              content: fullText || null, // Preserve original thought
-              tool_calls: [{
-                id: toolCall.id,
-                type: 'function',
-                function: {
-                  name: 'web_search',
-                  arguments: toolCall.function.arguments
-                }
-              }]
-            },
-            {
-              role: 'tool',
-              tool_call_id: toolCall.id,
-              content: `[WEB SEARCH RESULTS]\n${searchResult.content}\n\n[INSTRUCTION]\n${searchInstruction}`
+      for (const toolCall of currentToolCalls) {
+        if (toolCall.function.name === 'web_search') {
+          try {
+            const args = JSON.parse(toolCall.function.arguments);
+            // Handle both 'query' (string) and 'queries' (array) formats
+            // Some models like Gemini may return 'queries' as an array
+            let query: string;
+            if (args.query) {
+              query = args.query;
+            } else if (args.queries && Array.isArray(args.queries) && args.queries.length > 0) {
+              // Join multiple queries or use the first one
+              query = args.queries[0];
+            } else {
+              console.warn('web_search tool call missing query:', args);
+              continue; // Skip this tool call
             }
-          ];
 
-          // Make follow-up call to get final response
-          const followUpResponse = await fetch(url, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({
-              model: model,
-              messages: followUpMessages,
-              stream: true
-            }),
-            signal
-          });
+            // Notify UI that search is starting
+            if (onWebSearch) {
+              onWebSearch({ query, isSearching: true });
+            }
 
-          if (followUpResponse.ok) {
-            // Signal that a new message should be created for the follow-up response
+            // Execute web search
+            if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+            const searchResult = await executeWebSearch(query, config, signal);
+
+            // Notify UI with search results and sources - signal to start a new message for AI response
             if (onWebSearch) {
               onWebSearch({
                 query,
@@ -1276,43 +1268,134 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
               });
             }
 
-            // Track the follow-up text separately
-            let followUpText = '';
-            const followUpContentType = followUpResponse.headers.get('content-type') || '';
-            if (followUpContentType.includes('application/json')) {
-              const data = await followUpResponse.json();
-              const choice = data.choices?.[0];
-              const content = choice?.message?.content || choice?.text || '';
-              if (content) {
-                followUpText = content;
-                fullText += content;
-                onChunk(content);
+            // Build follow-up messages with tool result
+            const searchInstruction = `Based on the web search results above, provide an accurate and up-to-date answer. The search results contain current information - use this data to answer the user's question. Do not rely on your training data if it conflicts with the search results.`;
+
+            const followUpMessages: any[] = [
+              ...currentMessages,
+              {
+                role: 'assistant',
+                content: currentFullText || null,
+                tool_calls: [{
+                  id: toolCall.id,
+                  type: 'function',
+                  function: {
+                    name: 'web_search',
+                    arguments: toolCall.function.arguments
+                  }
+                }]
+              },
+              {
+                role: 'tool',
+                tool_call_id: toolCall.id,
+                content: `[WEB SEARCH RESULTS]\n${searchResult.content}\n\n[INSTRUCTION]\n${searchInstruction}`
+              }
+            ];
+
+            // Make follow-up call - INCLUDE TOOLS so AI can request more searches if needed
+            const followUpRequestBody: any = {
+              model: model,
+              messages: followUpMessages,
+              stream: true
+            };
+
+            // Include tools definition so AI can request more searches
+            if (useNativeGoogleSearch) {
+              followUpRequestBody.tools = [GOOGLE_SEARCH_TOOL];
+            } else {
+              followUpRequestBody.tools = [WEB_SEARCH_TOOL];
+              followUpRequestBody.tool_choice = 'auto';
+            }
+
+            const followUpResponse = await fetch(url, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify(followUpRequestBody),
+              signal
+            });
+
+            if (followUpResponse.ok) {
+              // Reset for next iteration
+              let followUpText = '';
+              let followUpToolCalls: any[] = [];
+
+              const followUpContentType = followUpResponse.headers.get('content-type') || '';
+              if (followUpContentType.includes('application/json')) {
+                const data = await followUpResponse.json();
+                const choice = data.choices?.[0];
+                const content = choice?.message?.content || choice?.text || '';
+                if (content) {
+                  followUpText = content;
+                  fullText += content;
+                  onChunk(content);
+                }
+                // Check for more tool calls
+                if (choice?.message?.tool_calls) {
+                  followUpToolCalls = choice.message.tool_calls;
+                }
+              } else {
+                await readStream(followUpResponse, (text) => {
+                  followUpText += text;
+                  fullText += text;
+                  onChunk(text);
+                }, (line) => {
+                  const trim = line.trim();
+                  if (!trim || !trim.startsWith('data: ')) return null;
+                  const dataStr = trim.slice(6);
+                  if (dataStr === '[DONE]') return null;
+                  try {
+                    const json = JSON.parse(dataStr);
+                    const choice = json.choices?.[0];
+
+                    // Check for tool calls in streaming response
+                    if (choice?.delta?.tool_calls) {
+                      for (const tc of choice.delta.tool_calls) {
+                        if (tc.index !== undefined) {
+                          if (!followUpToolCalls[tc.index]) {
+                            followUpToolCalls[tc.index] = { id: '', type: 'function', function: { name: '', arguments: '' } };
+                          }
+                          if (tc.id) followUpToolCalls[tc.index].id = tc.id;
+                          if (tc.function?.name) followUpToolCalls[tc.index].function.name = tc.function.name;
+                          if (tc.function?.arguments) followUpToolCalls[tc.index].function.arguments += tc.function.arguments;
+                        }
+                      }
+                    }
+
+                    return choice?.delta?.content || null;
+                  } catch {
+                    return null;
+                  }
+                });
+              }
+
+              // Update state for next iteration
+              currentMessages = followUpMessages;
+              currentFullText = followUpText;
+              currentToolCalls = followUpToolCalls.filter(tc => tc.function?.name === 'web_search');
+
+              // If no more tool calls, we're done
+              if (currentToolCalls.length === 0) {
+                break;
               }
             } else {
-              await readStream(followUpResponse, (text) => {
-                followUpText += text;
-                fullText += text;
-                onChunk(text);
-              }, (line) => {
-                const trim = line.trim();
-                if (!trim || !trim.startsWith('data: ')) return null;
-                const dataStr = trim.slice(6);
-                if (dataStr === '[DONE]') return null;
-                try {
-                  const json = JSON.parse(dataStr);
-                  return json.choices?.[0]?.delta?.content || null;
-                } catch {
-                  return null;
-                }
-              });
+              // Follow-up request failed, stop iteration
+              currentToolCalls = [];
+              break;
             }
-          }
-        } catch (e) {
-          console.error('Tool call failed:', e);
-          if (onWebSearch) {
-            onWebSearch({ query: '', result: 'Search failed', isSearching: false, sources: [] });
+          } catch (e) {
+            console.error('Tool call failed:', e);
+            if (onWebSearch) {
+              onWebSearch({ query: '', result: 'Search failed', isSearching: false, sources: [] });
+            }
+            currentToolCalls = [];
+            break;
           }
         }
+      }
+
+      // Only continue if there are more tool calls to process
+      if (currentToolCalls.length === 0) {
+        break;
       }
     }
   }
@@ -1323,8 +1406,11 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
 const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, signal?: AbortSignal, _config?: AppConfig, _onReasoning?: (text: string) => void): Promise<ApiResponse> => {
   const url = `${baseUrl}/messages`;
 
-  const systemMessage = messages.find(m => m.role === 'system');
-  const chatMessages = messages.filter(m => m.role !== 'system').map(m => {
+  // Sanitize messages to remove UI-only fields and filter empty messages
+  const sanitizedMessages = sanitizeMessagesForApi(messages);
+
+  const systemMessage = sanitizedMessages.find(m => m.role === 'system');
+  const chatMessages = sanitizedMessages.filter(m => m.role !== 'system').map(m => {
     if (m.image) {
       const [meta, data] = m.image.split(',');
       const mimeType = meta.split(':')[1].split(';')[0];
@@ -1336,7 +1422,7 @@ const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, m
         ]
       };
     }
-    return m;
+    return { role: m.role, content: m.content };
   });
 
   const body: any = {
@@ -1401,7 +1487,10 @@ const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, m
 const streamPerplexity = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, signal?: AbortSignal, _onReasoning?: (text: string) => void): Promise<ApiResponse> => {
   const url = `${baseUrl}/chat/completions`;
 
-  const msgs = messages.map(m => {
+  // Sanitize messages to remove UI-only fields and filter empty messages
+  const sanitizedMessages = sanitizeMessagesForApi(messages);
+
+  const msgs = sanitizedMessages.map(m => {
     if (m.image) {
       return {
         role: m.role,
@@ -1476,7 +1565,10 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
   // API: POST https://.../streamGenerateContent?key=...
   const url = `${baseUrl}/models/${model}:streamGenerateContent?key=${apiKey}`;
 
-  const contents = messages.map(m => {
+  // Sanitize messages to remove UI-only fields and filter empty messages
+  const sanitizedMessages = sanitizeMessagesForApi(messages);
+
+  const contents = sanitizedMessages.map(m => {
     const parts: any[] = [{ text: m.content }];
     if (m.image) {
       const imagePart = parseImageForGemini(m.image);

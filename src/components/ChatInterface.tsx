@@ -508,9 +508,9 @@ export default function ChatInterface({
                     });
                 }
             }, abortControllerRef.current.signal, (searchStatus) => {
-                if (searchStatus.startNewMessage && !isInNewMessage) {
-                    // Create a new message for the follow-up response (only once)
-                    isInNewMessage = true;
+                if (searchStatus.startNewMessage) {
+                    // Create a new message for the follow-up response
+                    // This can happen multiple times for sequential web searches
                     accumulatedText = ''; // Reset for new message
                     accumulatedReasoning = ''; // Reset reasoning for new message
                     setMessages(prev => {
@@ -525,11 +525,12 @@ export default function ChatInterface({
                                 sources: searchStatus.sources
                             };
                         }
-                        // Add new assistant message for the follow-up (no webSearch on this one)
+                        // Add new assistant message for the follow-up (no webSearch on this one yet)
                         return [...updated, { role: 'assistant', content: '' }];
                     });
-                } else if (!isInNewMessage) {
-                    // Only update web search info if we haven't created a new message yet
+                    isInNewMessage = true;
+                } else {
+                    // Update web search info on current message (search in progress)
                     setMessages(prev => {
                         const updated = [...prev];
                         const last = updated[updated.length - 1];
@@ -544,7 +545,6 @@ export default function ChatInterface({
                         return updated;
                     });
                 }
-                // If isInNewMessage is true and it's not startNewMessage, skip (don't update the new message's webSearch)
             }, (reasoningChunk) => {
                 // Handle reasoning content (from models like DeepSeek)
                 accumulatedReasoning += reasoningChunk;
@@ -713,9 +713,9 @@ export default function ChatInterface({
                     });
                 }
             }, abortControllerRef.current.signal, (searchStatus) => {
-                if (searchStatus.startNewMessage && !isInNewMessage) {
-                    // Create a new message for the follow-up response (only once)
-                    isInNewMessage = true;
+                if (searchStatus.startNewMessage) {
+                    // Create a new message for the follow-up response
+                    // This can happen multiple times for sequential web searches
                     accumulatedText = ''; // Reset for new message
                     accumulatedReasoning = ''; // Reset reasoning for new message
                     setMessages(prev => {
@@ -730,11 +730,12 @@ export default function ChatInterface({
                                 sources: searchStatus.sources
                             };
                         }
-                        // Add new assistant message for the follow-up (no webSearch on this one)
+                        // Add new assistant message for the follow-up (no webSearch on this one yet)
                         return [...updated, { role: 'assistant', content: '' }];
                     });
-                } else if (!isInNewMessage) {
-                    // Only update web search info if we haven't created a new message yet
+                    isInNewMessage = true;
+                } else {
+                    // Update web search info on current message (search in progress)
                     setMessages(prev => {
                         const updated = [...prev];
                         const last = updated[updated.length - 1];
@@ -749,7 +750,6 @@ export default function ChatInterface({
                         return updated;
                     });
                 }
-                // If isInNewMessage is true and it's not startNewMessage, skip (don't update the new message's webSearch)
             }, (reasoningChunk) => {
                 // Handle reasoning content (from models like DeepSeek)
                 accumulatedReasoning += reasoningChunk;
@@ -815,8 +815,7 @@ export default function ChatInterface({
                             return updated;
                         });
                     }, abortControllerRef.current.signal, (searchStatus) => {
-                        if (searchStatus.startNewMessage && !isInNewMessage) {
-                            isInNewMessage = true;
+                        if (searchStatus.startNewMessage) {
                             accumulatedText = '';
                             accumulatedReasoning = '';
                             setMessages(prev => {
@@ -832,7 +831,8 @@ export default function ChatInterface({
                                 }
                                 return [...updated, { role: 'assistant', content: '' }];
                             });
-                        } else if (!isInNewMessage) {
+                            isInNewMessage = true;
+                        } else {
                             setMessages(prev => {
                                 const updated = [...prev];
                                 const last = updated[updated.length - 1];
