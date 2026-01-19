@@ -5,7 +5,10 @@ import { callApi, fetchModels } from '../lib/api';
 import { Send, Settings, Sparkles, Loader2, User, Bot, Trash2, Zap, Image as ImageIcon, ChevronDown, ChevronRight, Check, X, Copy, PauseCircle, SquarePen, Clock, Globe, Link2, ExternalLink, Square, RefreshCw } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 import remarkBreaks from 'remark-breaks';
+import 'katex/dist/katex.min.css';
 import { clsx } from 'clsx';
 import { setStorage } from '../lib/storage';
 
@@ -1301,7 +1304,7 @@ export default function ChatInterface({
                                             {(expandedReasoning[idx] ?? config.alwaysExpandReasoning ?? false) && (
                                                 <div className="mt-1 pl-3 border-l-2 border-slate-200 dark:border-slate-700 ml-1.5">
                                                     <div className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed max-h-[30vh] overflow-y-auto custom-scrollbar">
-                                                        <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>
+                                                        <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]} rehypePlugins={[rehypeKatex]}>
                                                             {msg.reasoning.replace(/(\*\*[^\*]+\*\*)\n(?!\n)/g, '$1\n\n')}
                                                         </ReactMarkdown>
                                                     </div>
@@ -1342,7 +1345,8 @@ export default function ChatInterface({
                                         </div>
                                     ) : (
                                         <ReactMarkdown
-                                            remarkPlugins={[remarkGfm, remarkBreaks]}
+                                            remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
+                                            rehypePlugins={[rehypeKatex]}
                                             components={{
                                                 a: ({ node, ...props }) => {
                                                     const href = props.href || '';
@@ -1402,7 +1406,8 @@ export default function ChatInterface({
                                                     <div className="px-3 py-2 bg-white dark:bg-gpt-main border-t border-slate-200 dark:border-gpt-hover max-h-48 overflow-y-auto custom-scrollbar">
                                                         <div className="text-xs text-slate-600 dark:text-gpt-secondary">
                                                             <ReactMarkdown
-                                                                remarkPlugins={[remarkGfm, remarkBreaks]}
+                                                                remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
+                                                                rehypePlugins={[rehypeKatex]}
                                                                 components={{
                                                                     a: ({ node, ...props }) => {
                                                                         const href = props.href || '';
@@ -1470,7 +1475,14 @@ export default function ChatInterface({
                                             <img src={msg.image} alt="Attached" className="w-48 h-48 object-cover rounded-lg" />
                                         </button>
                                     )}
-                                    <div className="whitespace-pre-wrap">{msg.content}</div>
+                                    <div className="whitespace-pre-wrap prose prose-sm max-w-none dark:prose-invert">
+                                        <ReactMarkdown
+                                            remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
+                                            rehypePlugins={[rehypeKatex]}
+                                        >
+                                            {msg.content}
+                                        </ReactMarkdown>
+                                    </div>
                                 </div>
                             )}
                             {/* Only show copy button when response is complete */}

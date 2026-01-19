@@ -22,4 +22,7 @@ export default defineConfig({
             },
         },
     },
+    esbuild: {
+        charset: 'ascii',
+    },
 })
