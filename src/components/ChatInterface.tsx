@@ -1265,12 +1265,12 @@ export default function ChatInterface({
                         <div className={`shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${msg.role === 'user' ? 'bg-slate-200 dark:bg-gpt-hover text-slate-500 dark:text-gpt-text' : 'bg-blue-600 text-white'}`}>
                             {msg.role === 'user' ? <User size={14} /> : <Bot size={14} />}
                         </div>
-                        <div className={`relative group max-w-[85%] p-3 rounded-2xl text-sm leading-relaxed shadow-sm dark:shadow-none ${msg.role === 'user'
+                        <div className={`relative group max-w-[85%] p-3 rounded-2xl text-sm shadow-sm dark:shadow-none ${msg.role === 'user'
                             ? 'bg-white dark:bg-gpt-input text-slate-800 dark:text-gpt-text border border-slate-200 dark:border-gpt-hover rounded-tr-none'
                             : 'bg-white dark:bg-transparent text-slate-800 dark:text-gpt-text border border-slate-200 dark:border-none rounded-tl-none px-0 py-0'
                             }`}>
                             {msg.role === 'assistant' ? (
-                                <div className={clsx("prose prose-sm max-w-none prose-slate dark:prose-invert prose-p:leading-relaxed prose-pre:bg-slate-100 dark:prose-pre:bg-gpt-sidebar prose-pre:p-2 prose-pre:rounded-lg mb-4",
+                                <div className={clsx("prose prose-sm max-w-none prose-slate dark:prose-invert prose-pre:bg-slate-100 dark:prose-pre:bg-gpt-sidebar prose-pre:p-2 prose-pre:rounded-lg mb-4",
                                     "dark:px-0 dark:py-0 px-1"
                                 )}>
                                     {/* Reasoning Section - shown when reasoning content exists */}
@@ -1474,13 +1474,8 @@ export default function ChatInterface({
                                             <img src={msg.image} alt="Attached" className="w-48 h-48 object-cover rounded-lg" />
                                         </button>
                                     )}
-                                    <div className="whitespace-pre-wrap prose prose-sm max-w-none dark:prose-invert">
-                                        <ReactMarkdown
-                                            remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
-                                            rehypePlugins={[rehypeKatex]}
-                                        >
-                                            {msg.content}
-                                        </ReactMarkdown>
+                                    <div className="whitespace-pre-wrap break-words text-sm">
+                                        {msg.content}
                                     </div>
                                 </div>
                             )}
