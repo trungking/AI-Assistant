@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { type AppConfig, type ChatMessage, type PromptTemplate, type Provider } from '../lib/types';
 import { callApi, fetchModels } from '../lib/api';
-import { Send, Settings, Sparkles, Loader2, User, Bot, Trash2, Zap, Image as ImageIcon, ChevronDown, ChevronRight, Check, X, Copy, PauseCircle, SquarePen, Clock, Globe, Link2, ExternalLink, Square, RefreshCw } from 'lucide-react';
+import { Send, Settings, Sparkles, Loader2, User, Bot, Trash2, Zap, Image as ImageIcon, ChevronDown, ChevronRight, Check, X, Copy, PauseCircle, SquarePen, Clock, Globe, Link2, ExternalLink, Square, RefreshCw, Download } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -66,6 +66,7 @@ export default function ChatInterface({
     const [, forceUpdate] = useState(0); // Force re-render for timer updates
     const [sourcesModal, setSourcesModal] = useState<{ sources: Array<{ title: string; url: string; snippet?: string }>; query: string } | null>(null);
     const [imageZoomOpen, setImageZoomOpen] = useState(false);
+    const [generatedImageZoom, setGeneratedImageZoom] = useState<string | null>(null);
     const [retryModelMenuOpen, setRetryModelMenuOpen] = useState<number | null>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -622,6 +623,19 @@ export default function ChatInterface({
                     }
                     return updated;
                 });
+            }, (imageUrl) => {
+                // Handle images from models that generate images
+                setMessages(prev => {
+                    const updated = [...prev];
+                    const last = updated[updated.length - 1];
+                    if (last && last.role === 'assistant') {
+                        if (!last.images) {
+                            last.images = [];
+                        }
+                        last.images.push(imageUrl);
+                    }
+                    return updated;
+                });
             });
 
             if (res.error) {
@@ -856,6 +870,19 @@ export default function ChatInterface({
                     const last = updated[updated.length - 1];
                     if (last && last.role === 'assistant') {
                         last.reasoning = accumulatedReasoning;
+                    }
+                    return updated;
+                });
+            }, (imageUrl) => {
+                // Handle images from models that generate images
+                setMessages(prev => {
+                    const updated = [...prev];
+                    const last = updated[updated.length - 1];
+                    if (last && last.role === 'assistant') {
+                        if (!last.images) {
+                            last.images = [];
+                        }
+                        last.images.push(imageUrl);
                     }
                     return updated;
                 });
@@ -1451,6 +1478,32 @@ export default function ChatInterface({
                                             <span>Stream interrupted</span>
                                         </div>
                                     )}
+                                    {/* Generated Images Section */}
+                                    {msg.images && msg.images.length > 0 && (
+                                        <div className="mt-3 not-prose">
+                                            <div className="grid grid-cols-2 gap-2">
+                                                {msg.images.map((imageUrl, imgIdx) => (
+                                                    <button
+                                                        key={imgIdx}
+                                                        onClick={() => setGeneratedImageZoom(imageUrl)}
+                                                        className="relative group rounded-lg overflow-hidden border-2 border-slate-200 dark:border-gpt-hover hover:border-blue-500 dark:hover:border-blue-400 transition-all cursor-zoom-in"
+                                                        title="Click to view full size"
+                                                    >
+                                                        <img
+                                                            src={imageUrl}
+                                                            alt={`Generated image ${imgIdx + 1}`}
+                                                            className="w-full h-auto object-contain bg-slate-100 dark:bg-slate-800"
+                                                        />
+                                                        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
+                                                            <div className="opacity-0 group-hover:opacity-100 transition-opacity bg-black/50 text-white text-xs font-medium px-2 py-1 rounded-lg">
+                                                                🔍 View Full Size
+                                                            </div>
+                                                        </div>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
                                     {/* Sources Button */}
                                     {msg.webSearch?.sources && msg.webSearch.sources.length > 0 && (
                                         <button
@@ -1720,6 +1773,49 @@ export default function ChatInterface({
                                 </a>
                             ))}
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Generated Image Zoom Modal */}
+            {generatedImageZoom && (
+                <div
+                    className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+                    onClick={() => setGeneratedImageZoom(null)}
+                >
+                    <div
+                        className="relative max-w-[90vw] max-h-[90vh] bg-white dark:bg-gpt-sidebar rounded-xl shadow-2xl overflow-hidden"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        {/* Header */}
+                        <div className="absolute top-0 left-0 right-0 flex items-center justify-between px-4 py-3 bg-gradient-to-b from-black/50 to-transparent z-10">
+                            <span className="text-white text-sm font-medium drop-shadow-lg">Generated Image</span>
+                            <div className="flex items-center gap-2">
+                                <a
+                                    href={generatedImageZoom}
+                                    download={`generated-image-${Date.now()}.png`}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="p-2 bg-white/20 hover:bg-white/30 rounded-lg transition-colors text-white"
+                                    title="Download image"
+                                >
+                                    <Download size={18} />
+                                </a>
+                                <button
+                                    onClick={() => setGeneratedImageZoom(null)}
+                                    className="p-2 bg-white/20 hover:bg-white/30 rounded-lg transition-colors text-white"
+                                    title="Close"
+                                >
+                                    <X size={18} />
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Image */}
+                        <img
+                            src={generatedImageZoom}
+                            alt="Generated image full size"
+                            className="max-w-full max-h-[90vh] object-contain"
+                        />
                     </div>
                 </div>
             )}

@@ -25,7 +25,8 @@ export interface PromptTemplate {
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
-  image?: string; // Data URL
+  image?: string; // Data URL (for user messages)
+  images?: string[]; // Array of image URLs (for assistant messages with generated images)
   interrupted?: boolean;
   responseTime?: number; // Response time in milliseconds
   reasoning?: string; // Reasoning/thinking content from models like DeepSeek

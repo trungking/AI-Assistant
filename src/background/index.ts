@@ -233,6 +233,12 @@ chrome.runtime.onConnect.addListener((port) => {
                             try {
                                 port.postMessage({ reasoning });
                             } catch (e) { /* ignore if disconnected */ }
+                        },
+                        (image) => {
+                            // Send image to content script
+                            try {
+                                port.postMessage({ image });
+                            } catch (e) { /* ignore if disconnected */ }
                         }
                     );
 

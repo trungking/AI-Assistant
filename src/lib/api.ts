@@ -579,7 +579,8 @@ export const executeApiStream = async (
   onChunk: (text: string) => void,
   signal?: AbortSignal,
   onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void,
-  onReasoning?: (text: string) => void
+  onReasoning?: (text: string) => void,
+  onImage?: (imageUrl: string) => void
 ): Promise<ApiResponse> => {
   const provider = config.selectedProvider;
   const apiKeys = config.apiKeys[provider];
@@ -602,11 +603,11 @@ export const executeApiStream = async (
     let result: ApiResponse;
     switch (provider) {
       case 'google':
-        result = await streamGoogle(apiKey, baseUrl, model, messages, onChunk, signal, config, onWebSearch, onReasoning);
+        result = await streamGoogle(apiKey, baseUrl, model, messages, onChunk, signal, config, onWebSearch, onReasoning, onImage);
         break;
       case 'openai':
       case 'openrouter':
-        result = await streamOpenAI(apiKey, baseUrl, model, messages, onChunk, provider === 'openrouter', signal, config, onWebSearch, onReasoning);
+        result = await streamOpenAI(apiKey, baseUrl, model, messages, onChunk, provider === 'openrouter', signal, config, onWebSearch, onReasoning, onImage);
         break;
       case 'anthropic':
         result = await streamAnthropic(apiKey, baseUrl, model, messages, onChunk, signal, config, onReasoning);
@@ -615,7 +616,7 @@ export const executeApiStream = async (
         result = await streamPerplexity(apiKey, baseUrl, model, messages, onChunk, signal, onReasoning);
         break;
       default:
-        result = await streamOpenAI(apiKey, baseUrl, model, messages, onChunk, false, signal, config, onWebSearch, onReasoning);
+        result = await streamOpenAI(apiKey, baseUrl, model, messages, onChunk, false, signal, config, onWebSearch, onReasoning, onImage);
     }
 
     // Check if response indicates quota exhaustion
@@ -641,7 +642,8 @@ export const callApi = async (
   onChunk?: (text: string) => void,
   signal?: AbortSignal,
   onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void,
-  onReasoning?: (text: string) => void
+  onReasoning?: (text: string) => void,
+  onImage?: (imageUrl: string) => void
 ): Promise<ApiResponse> => {
   // Check context
   if (window.location.protocol.startsWith('http')) {
@@ -674,6 +676,9 @@ export const callApi = async (
           } else if (msg.webSearch && onWebSearch) {
             // Handle web search status from background
             onWebSearch(msg.webSearch);
+          } else if (msg.image && onImage) {
+            // Handle image from background
+            onImage(msg.image);
           }
         });
 
@@ -688,7 +693,7 @@ export const callApi = async (
   } else {
     // Extension Context -> Direct Call
     if (onChunk) {
-      return executeApiStream(messages, config, onChunk, signal, onWebSearch, onReasoning);
+      return executeApiStream(messages, config, onChunk, signal, onWebSearch, onReasoning, onImage);
     } else {
       return executeApiCall(messages, config);
     }
@@ -1020,7 +1025,7 @@ const readStream = async (response: Response, onChunk: (text: string) => void, p
   }
 };
 
-const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, isOpenRouter = false, signal?: AbortSignal, config?: AppConfig, onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void, onReasoning?: (text: string) => void): Promise<ApiResponse> => {
+const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, isOpenRouter = false, signal?: AbortSignal, config?: AppConfig, onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void, onReasoning?: (text: string) => void, onImage?: (imageUrl: string) => void): Promise<ApiResponse> => {
   const url = `${baseUrl}/chat/completions`;
 
   // Sanitize messages to remove UI-only fields and filter empty messages
@@ -1200,6 +1205,16 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
         const reasoningContent = choice?.delta?.reasoning_content;
         if (reasoningContent && onReasoning) {
           onReasoning(reasoningContent);
+        }
+
+        // Handle images (used by models that return generated images)
+        const images = choice?.delta?.images;
+        if (images && Array.isArray(images) && onImage) {
+          for (const img of images) {
+            if (img?.image_url?.url) {
+              onImage(img.image_url.url);
+            }
+          }
         }
 
         const content = choice?.delta?.content;
@@ -1561,7 +1576,7 @@ const streamPerplexity = async (apiKey: string, baseUrl: string, model: string, 
   return { text: fullText };
 };
 
-const streamGoogle = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, signal?: AbortSignal, config?: AppConfig, onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void, _onReasoning?: (text: string) => void): Promise<ApiResponse> => {
+const streamGoogle = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, signal?: AbortSignal, config?: AppConfig, onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void, _onReasoning?: (text: string) => void, onImage?: (imageUrl: string) => void): Promise<ApiResponse> => {
   // API: POST https://.../streamGenerateContent?key=...
   const url = `${baseUrl}/models/${model}:streamGenerateContent?key=${apiKey}`;
 
@@ -1698,6 +1713,20 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
             if (text) {
               fullText += text;
               onChunk(text);
+            }
+
+            // Extract images from parts if present
+            if (onImage) {
+              const parts = json.candidates?.[0]?.content?.parts;
+              if (parts && Array.isArray(parts)) {
+                for (const part of parts) {
+                  if (part.inlineData && part.inlineData.mimeType && part.inlineData.data) {
+                    // Convert base64 image to data URL
+                    const imageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+                    onImage(imageUrl);
+                  }
+                }
+              }
             }
 
             // Extract grounding metadata from streaming response
