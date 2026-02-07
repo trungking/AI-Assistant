@@ -7,10 +7,11 @@ interface SearchableSelectProps {
     options: string[];
     onChange: (value: string) => void;
     onCustomClick?: () => void;
+    onOpen?: () => void;
     placeholder?: string;
 }
 
-export function SearchableSelect({ value, options, onChange, onCustomClick, placeholder }: SearchableSelectProps) {
+export function SearchableSelect({ value, options, onChange, onCustomClick, onOpen, placeholder }: SearchableSelectProps) {
     const [isOpen, setIsOpen] = useState(false);
     const [search, setSearch] = useState('');
     const containerRef = useRef<HTMLDivElement>(null);
@@ -45,7 +46,11 @@ export function SearchableSelect({ value, options, onChange, onCustomClick, plac
     return (
         <div className="relative" ref={containerRef}>
             <button
-                onClick={() => setIsOpen(!isOpen)}
+                onClick={() => {
+                    const opening = !isOpen;
+                    setIsOpen(opening);
+                    if (opening && onOpen) onOpen();
+                }}
                 className="w-full px-3 py-2.5 text-sm bg-slate-50 dark:bg-gpt-input border border-slate-200 dark:border-gpt-hover rounded-lg focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all dark:text-gpt-text flex items-center justify-between group"
             >
                 <span className={clsx("truncate", !value && "text-slate-400 dark:text-slate-500")}>

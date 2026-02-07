@@ -281,6 +281,25 @@ export default function ChatInterface({
                 searchInputRef.current?.focus();
                 searchInputRef.current?.select();
             }, 50);
+
+            // Auto-refresh models when dropdown opens
+            const refreshModels = async () => {
+                const models: Record<string, string[]> = {};
+                for (const provider of Object.keys(config.apiKeys) as Provider[]) {
+                    if (config.apiKeys[provider] && config.apiKeys[provider].length > 0) {
+                        try {
+                            const fetched = await fetchModels(provider, config.apiKeys[provider][0], config.customBaseUrls[provider]);
+                            if (fetched.length > 0) {
+                                models[provider] = fetched;
+                            }
+                        } catch (e) {
+                            console.error(`Failed to fetch models for ${provider}`, e);
+                        }
+                    }
+                }
+                setAvailableModels(prev => ({ ...prev, ...models }));
+            };
+            refreshModels();
         } else {
             setModelSearch('');
         }

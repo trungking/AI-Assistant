@@ -728,6 +728,7 @@ export default function Options() {
                                                                     options={fetchedModels[backupModelProvider]}
                                                                     onChange={(value) => setBackupModelName(value)}
                                                                     onCustomClick={() => setIsBackupCustomModel(true)}
+                                                                    onOpen={() => handleFetchModels(backupModelProvider, true)}
                                                                     placeholder="Select a model..."
                                                                 />
                                                             ) : (
@@ -905,6 +906,7 @@ export default function Options() {
                                                                 selectedModel: { ...config.selectedModel, [provider]: value }
                                                             })}
                                                             onCustomClick={() => setIsCustomModel(prev => ({ ...prev, [provider]: true }))}
+                                                            onOpen={() => handleFetchModels(provider, true)}
                                                             placeholder="Select a model..."
                                                         />
                                                     ) : (
@@ -1229,6 +1231,7 @@ export default function Options() {
                                                                 options={fetchedModels[promptModelProvider]}
                                                                 onChange={(value) => setPromptModelName(value)}
                                                                 onCustomClick={() => setIsPromptCustomModel(true)}
+                                                                onOpen={() => handleFetchModels(promptModelProvider, true)}
                                                                 placeholder="Select a model..."
                                                             />
                                                         ) : (
