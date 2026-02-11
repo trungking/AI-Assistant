@@ -59,7 +59,7 @@ export default function ChatInterface({
     const [availableModels, setAvailableModels] = useState<Record<string, string[]>>({});
     const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
     const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
-    const [expandedSearches, setExpandedSearches] = useState<Record<number, boolean>>({});
+    const [expandedSearches, setExpandedSearches] = useState<Record<string, boolean>>({});
     const [expandedReasoning, setExpandedReasoning] = useState<Record<number, boolean>>({});
     const [reasoningStartTime, setReasoningStartTime] = useState<Record<number, number>>({});
     const [reasoningElapsed, setReasoningElapsed] = useState<Record<number, number>>({});
@@ -215,12 +215,20 @@ export default function ChatInterface({
                             const updated = [...prev];
                             const last = updated[updated.length - 1];
                             if (last && last.role === 'assistant') {
-                                last.webSearch = {
+                                const newEntry = {
                                     query: msg.webSearch.query,
                                     result: msg.webSearch.result || '',
                                     isSearching: msg.webSearch.isSearching,
                                     sources: msg.webSearch.sources
                                 };
+                                if (!last.webSearches) last.webSearches = [];
+                                // Update existing entry for same query or append
+                                const existingIdx = last.webSearches.findIndex(s => s.query === newEntry.query);
+                                if (existingIdx >= 0) {
+                                    last.webSearches[existingIdx] = newEntry;
+                                } else {
+                                    last.webSearches.push(newEntry);
+                                }
                             }
                             return [...updated];
                         });
@@ -726,39 +734,45 @@ export default function ChatInterface({
                     });
                 }
             }, abortControllerRef.current.signal, (searchStatus) => {
+                const searchEntry = {
+                    query: searchStatus.query,
+                    result: searchStatus.result || '',
+                    isSearching: searchStatus.isSearching,
+                    sources: searchStatus.sources
+                };
                 if (searchStatus.startNewMessage) {
                     // Create a new message for the follow-up response
-                    // This can happen multiple times for sequential web searches
                     accumulatedText = ''; // Reset for new message
                     accumulatedReasoning = ''; // Reset reasoning for new message
                     setMessages(prev => {
                         const updated = [...prev];
-                        // Update the previous message's web search info only (don't touch content)
                         const prevLast = updated[updated.length - 1];
                         if (prevLast && prevLast.role === 'assistant') {
-                            prevLast.webSearch = {
-                                query: searchStatus.query,
-                                result: searchStatus.result || '',
-                                isSearching: false,
-                                sources: searchStatus.sources
-                            };
+                            if (!prevLast.webSearches) prevLast.webSearches = [];
+                            const existingIdx = prevLast.webSearches.findIndex(s => s.query === searchEntry.query);
+                            if (existingIdx >= 0) {
+                                prevLast.webSearches[existingIdx] = { ...searchEntry, isSearching: false };
+                            } else {
+                                prevLast.webSearches.push({ ...searchEntry, isSearching: false });
+                            }
                         }
-                        // Add new assistant message for the follow-up (no webSearch on this one yet)
+                        // Add new assistant message for the follow-up
                         return [...updated, { role: 'assistant', content: '' }];
                     });
                     isInNewMessage = true;
                 } else {
-                    // Update web search info on current message (search in progress)
+                    // Update web search info on current message (search in progress or done)
                     setMessages(prev => {
                         const updated = [...prev];
                         const last = updated[updated.length - 1];
                         if (last && last.role === 'assistant') {
-                            last.webSearch = {
-                                query: searchStatus.query,
-                                result: searchStatus.result || '',
-                                isSearching: searchStatus.isSearching,
-                                sources: searchStatus.sources
-                            };
+                            if (!last.webSearches) last.webSearches = [];
+                            const existingIdx = last.webSearches.findIndex(s => s.query === searchEntry.query);
+                            if (existingIdx >= 0) {
+                                last.webSearches[existingIdx] = searchEntry;
+                            } else {
+                                last.webSearches.push(searchEntry);
+                            }
                         }
                         return updated;
                     });
@@ -976,39 +990,42 @@ export default function ChatInterface({
                     });
                 }
             }, abortControllerRef.current.signal, (searchStatus) => {
+                const searchEntry = {
+                    query: searchStatus.query,
+                    result: searchStatus.result || '',
+                    isSearching: searchStatus.isSearching,
+                    sources: searchStatus.sources
+                };
                 if (searchStatus.startNewMessage) {
-                    // Create a new message for the follow-up response
-                    // This can happen multiple times for sequential web searches
                     accumulatedText = ''; // Reset for new message
                     accumulatedReasoning = ''; // Reset reasoning for new message
                     setMessages(prev => {
                         const updated = [...prev];
-                        // Update the previous message's web search info only (don't touch content)
                         const prevLast = updated[updated.length - 1];
                         if (prevLast && prevLast.role === 'assistant') {
-                            prevLast.webSearch = {
-                                query: searchStatus.query,
-                                result: searchStatus.result || '',
-                                isSearching: false,
-                                sources: searchStatus.sources
-                            };
+                            if (!prevLast.webSearches) prevLast.webSearches = [];
+                            const existingIdx = prevLast.webSearches.findIndex(s => s.query === searchEntry.query);
+                            if (existingIdx >= 0) {
+                                prevLast.webSearches[existingIdx] = { ...searchEntry, isSearching: false };
+                            } else {
+                                prevLast.webSearches.push({ ...searchEntry, isSearching: false });
+                            }
                         }
-                        // Add new assistant message for the follow-up (no webSearch on this one yet)
                         return [...updated, { role: 'assistant', content: '' }];
                     });
                     isInNewMessage = true;
                 } else {
-                    // Update web search info on current message (search in progress)
                     setMessages(prev => {
                         const updated = [...prev];
                         const last = updated[updated.length - 1];
                         if (last && last.role === 'assistant') {
-                            last.webSearch = {
-                                query: searchStatus.query,
-                                result: searchStatus.result || '',
-                                isSearching: searchStatus.isSearching,
-                                sources: searchStatus.sources
-                            };
+                            if (!last.webSearches) last.webSearches = [];
+                            const existingIdx = last.webSearches.findIndex(s => s.query === searchEntry.query);
+                            if (existingIdx >= 0) {
+                                last.webSearches[existingIdx] = searchEntry;
+                            } else {
+                                last.webSearches.push(searchEntry);
+                            }
                         }
                         return updated;
                     });
@@ -1091,6 +1108,12 @@ export default function ChatInterface({
                             return updated;
                         });
                     }, abortControllerRef.current.signal, (searchStatus) => {
+                        const searchEntry = {
+                            query: searchStatus.query,
+                            result: searchStatus.result || '',
+                            isSearching: searchStatus.isSearching,
+                            sources: searchStatus.sources
+                        };
                         if (searchStatus.startNewMessage) {
                             accumulatedText = '';
                             accumulatedReasoning = '';
@@ -1098,12 +1121,13 @@ export default function ChatInterface({
                                 const updated = [...prev];
                                 const prevLast = updated[updated.length - 1];
                                 if (prevLast && prevLast.role === 'assistant') {
-                                    prevLast.webSearch = {
-                                        query: searchStatus.query,
-                                        result: searchStatus.result || '',
-                                        isSearching: false,
-                                        sources: searchStatus.sources
-                                    };
+                                    if (!prevLast.webSearches) prevLast.webSearches = [];
+                                    const existingIdx = prevLast.webSearches.findIndex(s => s.query === searchEntry.query);
+                                    if (existingIdx >= 0) {
+                                        prevLast.webSearches[existingIdx] = { ...searchEntry, isSearching: false };
+                                    } else {
+                                        prevLast.webSearches.push({ ...searchEntry, isSearching: false });
+                                    }
                                 }
                                 return [...updated, { role: 'assistant', content: '' }];
                             });
@@ -1113,12 +1137,13 @@ export default function ChatInterface({
                                 const updated = [...prev];
                                 const last = updated[updated.length - 1];
                                 if (last && last.role === 'assistant') {
-                                    last.webSearch = {
-                                        query: searchStatus.query,
-                                        result: searchStatus.result || '',
-                                        isSearching: searchStatus.isSearching,
-                                        sources: searchStatus.sources
-                                    };
+                                    if (!last.webSearches) last.webSearches = [];
+                                    const existingIdx = last.webSearches.findIndex(s => s.query === searchEntry.query);
+                                    if (existingIdx >= 0) {
+                                        last.webSearches[existingIdx] = searchEntry;
+                                    } else {
+                                        last.webSearches.push(searchEntry);
+                                    }
                                 }
                                 return updated;
                             });
@@ -1518,10 +1543,10 @@ export default function ChatInterface({
                                         </div>
                                     )}
                                     {/* Response content - show static text for web search messages, Thinking for loading */}
-                                    {!msg.content && msg.webSearch ? (
-                                        // Message has web search but no content - show static text
+                                    {!msg.content && msg.webSearches && msg.webSearches.length > 0 ? (
+                                        // Message has web searches but no content - show static text
                                         <div className="text-sm text-slate-700 dark:text-gpt-text py-1">
-                                            AI is using web search to search for "{msg.webSearch.query}"
+                                            AI is searching the web{msg.webSearches.length > 1 ? ` (${msg.webSearches.length} queries)` : `: "${msg.webSearches[0].query}"`}
                                         </div>
                                     ) : !msg.content && loading && idx === messages.length - 1 && !msg.reasoning ? (
                                         // Empty message at the end while loading (and no reasoning) - show Thinking
@@ -1538,7 +1563,8 @@ export default function ChatInterface({
                                                     const href = props.href || '';
                                                     if (href.startsWith('#source-')) {
                                                         const index = parseInt(href.replace('#source-', ''));
-                                                        const source = msg.webSearch?.sources?.[index - 1];
+                                                        const allSources = msg.webSearches?.flatMap(s => s.sources || []) || [];
+                                                        const source = allSources[index - 1];
 
                                                         if (source) {
                                                             return (
@@ -1567,66 +1593,143 @@ export default function ChatInterface({
                                             {msg.content.replace(/\[\^(\d+)\]/g, '[$1](#source-$1)')}
                                         </ReactMarkdown>
                                     )}
-                                    {/* Web Search Section - always shown when webSearch exists */}
-                                    {msg.webSearch && (
+                                    {/* Web Search Sections - Grouped Card */}
+                                    {msg.webSearches && msg.webSearches.length > 0 && (
                                         <div className="mt-3 not-prose">
-                                            <div className="border border-slate-200 dark:border-gpt-hover rounded-lg overflow-hidden">
+                                            <div className="border border-slate-200 dark:border-gpt-hover rounded-lg overflow-hidden bg-slate-50 dark:bg-gpt-sidebar transition-all duration-200">
+                                                {/* Main Header - Toggles list visibility */}
                                                 <button
-                                                    onClick={() => setExpandedSearches(prev => ({ ...prev, [idx]: !prev[idx] }))}
-                                                    className="w-full flex items-center gap-2 px-3 py-2 bg-slate-50 dark:bg-gpt-sidebar hover:bg-slate-100 dark:hover:bg-gpt-hover transition-colors text-left"
-                                                    disabled={msg.webSearch.isSearching}
+                                                    onClick={() => setExpandedSearches(prev => ({ ...prev, [`${idx}-main`]: !prev[`${idx}-main`] }))}
+                                                    className="w-full flex items-center justify-between px-3 py-2.5 text-left hover:bg-slate-100 dark:hover:bg-gpt-hover transition-colors group"
                                                 >
-                                                    {msg.webSearch.isSearching ? (
-                                                        <Loader2 size={14} className="animate-spin text-blue-500 shrink-0" />
-                                                    ) : (
-                                                        <Globe size={14} className="text-green-500 shrink-0" />
-                                                    )}
-                                                    <span className="text-xs font-medium text-slate-700 dark:text-gpt-text flex-1 truncate">
-                                                        {msg.webSearch.isSearching ? `Searching: "${msg.webSearch.query}"...` : `Web search: "${msg.webSearch.query}"`}
-                                                    </span>
-                                                    {!msg.webSearch.isSearching && (
-                                                        <ChevronRight size={14} className={clsx("text-slate-400 transition-transform", expandedSearches[idx] && "rotate-90")} />
-                                                    )}
-                                                </button>
-                                                {!msg.webSearch.isSearching && expandedSearches[idx] && (
-                                                    <div className="px-3 py-2 bg-white dark:bg-gpt-main border-t border-slate-200 dark:border-gpt-hover max-h-48 overflow-y-auto custom-scrollbar">
-                                                        <div className="text-xs text-slate-600 dark:text-gpt-secondary">
-                                                            <ReactMarkdown
-                                                                remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
-                                                                rehypePlugins={[rehypeKatex]}
-                                                                components={{
-                                                                    a: ({ node, ...props }: any) => {
-                                                                        const href = props.href || '';
-                                                                        if (href.startsWith('#source-')) {
-                                                                            const index = parseInt(href.replace('#source-', ''));
-                                                                            const source = msg.webSearch?.sources?.[index - 1];
-
-                                                                            if (source) {
-                                                                                return (
-                                                                                    <span className="inline-flex items-center justify-center align-super text-[9px]">
-                                                                                        <a
-                                                                                            href={source.url}
-                                                                                            target="_blank"
-                                                                                            rel="noopener noreferrer"
-                                                                                            className="flex items-center justify-center w-3.5 h-3.5 rounded-full bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-blue-600 hover:text-white dark:hover:bg-blue-500 transition-colors no-underline font-medium mx-0.5"
-                                                                                            title={`${source.title}\n${source.url}`}
-                                                                                            onClick={(e) => {
-                                                                                                e.stopPropagation();
-                                                                                            }}
-                                                                                        >
-                                                                                            {index}
-                                                                                        </a>
-                                                                                    </span>
-                                                                                );
-                                                                            }
-                                                                        }
-                                                                        return <a {...props} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline" />;
-                                                                    }
-                                                                } as any}
-                                                            >
-                                                                {msg.webSearch.result.replace(/\[\^(\d+)\]/g, '[$1](#source-$1)')}
-                                                            </ReactMarkdown>
+                                                    <div className="flex items-center gap-2.5 overflow-hidden flex-1">
+                                                        <div className={clsx(
+                                                            "flex items-center justify-center w-5 h-5 rounded-full shrink-0 transition-colors",
+                                                            msg.webSearches.some(s => s.isSearching)
+                                                                ? "bg-blue-100 dark:bg-blue-900/30 text-blue-500"
+                                                                : "bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-500"
+                                                        )}>
+                                                            {msg.webSearches.some(s => s.isSearching) ? (
+                                                                <Loader2 size={12} className="animate-spin" />
+                                                            ) : (
+                                                                <Globe size={12} />
+                                                            )}
                                                         </div>
+                                                        <div className="flex flex-col items-start min-w-0 flex-1">
+                                                            <span className="text-xs font-semibold text-slate-700 dark:text-gpt-text truncate w-full">
+                                                                {msg.webSearches.some(s => s.isSearching)
+                                                                    ? "Searching the web..."
+                                                                    : "Web Search Completed"}
+                                                            </span>
+                                                            <span className="text-[10px] text-slate-500 dark:text-slate-400 truncate w-full">
+                                                                {msg.webSearches.length} {msg.webSearches.length === 1 ? 'query' : 'queries'}{(() => { const total = msg.webSearches.reduce((acc, s) => acc + (s.sources?.length || 0), 0); return total > 0 ? ` · ${total} sources` : ''; })()}
+                                                            </span>
+                                                        </div>
+                                                    </div>
+                                                    <ChevronRight
+                                                        size={14}
+                                                        className={clsx(
+                                                            "text-slate-400 group-hover:text-slate-600 dark:group-hover:text-slate-300 transition-transform duration-200",
+                                                            expandedSearches[`${idx}-main`] && "rotate-90"
+                                                        )}
+                                                    />
+                                                </button>
+
+                                                {/* Expanded List of Queries */}
+                                                {expandedSearches[`${idx}-main`] && (
+                                                    <div className="border-t border-slate-200 dark:border-gpt-hover bg-white dark:bg-gpt-main divide-y divide-slate-100 dark:divide-gpt-hover">
+                                                        {msg.webSearches.map((search, searchIdx) => {
+                                                            const searchKey = `${idx}-${searchIdx}`;
+                                                            return (
+                                                                <div key={searchIdx} className="flex flex-col">
+                                                                    <button
+                                                                        onClick={() => setExpandedSearches(prev => ({ ...prev, [searchKey]: !prev[searchKey] }))}
+                                                                        className="w-full flex items-start gap-3 px-3 py-2 hover:bg-slate-50 dark:hover:bg-gpt-sidebar transition-colors text-left group/item"
+                                                                    >
+                                                                        <div className="mt-0.5 shrink-0">
+                                                                            {search.isSearching ? (
+                                                                                <Loader2 size={12} className="animate-spin text-blue-400" />
+                                                                            ) : (
+                                                                                <Check size={12} className="text-green-500" />
+                                                                            )}
+                                                                        </div>
+                                                                        <span className={clsx(
+                                                                            "text-xs flex-1 leading-relaxed transition-colors",
+                                                                            expandedSearches[searchKey]
+                                                                                ? "text-slate-900 dark:text-slate-200 font-medium"
+                                                                                : "text-slate-600 dark:text-gpt-secondary group-hover/item:text-slate-900 dark:group-hover/item:text-slate-300"
+                                                                        )}>
+                                                                            {search.query}
+                                                                        </span>
+                                                                        {!search.isSearching && (
+                                                                            <ChevronRight
+                                                                                size={12}
+                                                                                className={clsx(
+                                                                                    "text-slate-300 group-hover/item:text-slate-400 mt-0.5 transition-transform duration-200",
+                                                                                    expandedSearches[searchKey] && "rotate-90"
+                                                                                )}
+                                                                            />
+                                                                        )}
+                                                                    </button>
+
+                                                                    {/* Individual Query Result */}
+                                                                    {!search.isSearching && expandedSearches[searchKey] && (
+                                                                        <div className="mx-3 mb-2 px-3 py-2 bg-slate-50 dark:bg-gpt-sidebar rounded-md border border-slate-100 dark:border-gpt-hover max-h-60 overflow-y-auto custom-scrollbar shadow-sm">
+                                                                            <div className="text-xs text-slate-700 dark:text-gpt-text leading-relaxed">
+                                                                                <ReactMarkdown
+                                                                                    remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
+                                                                                    rehypePlugins={[rehypeKatex]}
+                                                                                    components={{
+                                                                                        a: ({ node, ...props }: any) => {
+                                                                                            const href = props.href || '';
+                                                                                            if (href.startsWith('#source-')) {
+                                                                                                const index = parseInt(href.replace('#source-', ''));
+                                                                                                const source = search.sources?.[index - 1]; // Local source index
+                                                                                                if (source) {
+                                                                                                    return (
+                                                                                                        <span className="inline-flex items-center justify-center align-super text-[9px] mx-0.5 align-middle -mt-2">
+                                                                                                            <a
+                                                                                                                href={source.url}
+                                                                                                                target="_blank"
+                                                                                                                rel="noopener noreferrer"
+                                                                                                                className="flex items-center justify-center w-3.5 h-3.5 rounded-full bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-300 hover:bg-blue-600 hover:text-white dark:hover:bg-blue-500 transition-all no-underline font-semibold shadow-sm ring-1 ring-blue-200 dark:ring-blue-800"
+                                                                                                                title={`${source.title}\n${source.url}`}
+                                                                                                                onClick={(e) => e.stopPropagation()}
+                                                                                                            >
+                                                                                                                {index}
+                                                                                                            </a>
+                                                                                                        </span>
+                                                                                                    );
+                                                                                                }
+                                                                                            }
+                                                                                            return <a {...props} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline" />;
+                                                                                        }
+                                                                                    } as any}
+                                                                                >
+                                                                                    {search.result.replace(/\[\^(\d+)\]/g, '[$1](#source-$1)')}
+                                                                                </ReactMarkdown>
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            );
+                                                        })}
+
+                                                        {/* Footer Actions */}
+                                                        {(() => {
+                                                            const allSources = msg.webSearches?.flatMap(s => s.sources || []) || [];
+                                                            return allSources.length > 0 && (
+                                                                <div className="px-3 py-2 bg-slate-50/50 dark:bg-gpt-sidebar/50">
+                                                                    <button
+                                                                        onClick={() => setSourcesModal({ sources: allSources, query: msg.webSearches!.map(s => s.query).join(', ') })}
+                                                                        className="flex items-center gap-1.5 text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors"
+                                                                    >
+                                                                        <Link2 size={12} />
+                                                                        View all {allSources.length} sources
+                                                                    </button>
+                                                                </div>
+                                                            );
+                                                        })()}
                                                     </div>
                                                 )}
                                             </div>
@@ -1664,16 +1767,8 @@ export default function ChatInterface({
                                             </div>
                                         </div>
                                     )}
-                                    {/* Sources Button */}
-                                    {msg.webSearch?.sources && msg.webSearch.sources.length > 0 && (
-                                        <button
-                                            onClick={() => setSourcesModal({ sources: msg.webSearch!.sources!, query: msg.webSearch!.query })}
-                                            className="flex items-center gap-1.5 mt-2 px-2 py-1 text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded-lg transition-colors border border-blue-200 dark:border-blue-800"
-                                        >
-                                            <Link2 size={12} />
-                                            <span>{msg.webSearch.sources.length} Sources</span>
-                                        </button>
-                                    )}
+                                    {/* Sources Button - aggregated from all searches */}
+
                                 </div>
                             ) : (
                                 <div>

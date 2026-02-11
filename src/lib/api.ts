@@ -35,16 +35,21 @@ const WEB_SEARCH_TOOL = {
   type: 'function' as const,
   function: {
     name: 'web_search',
-    description: 'Search the web for current information. Use this when you need up-to-date information, recent news, current events, or facts you are unsure about.',
+    description: 'Search the web for current information. Use this when you need up-to-date information, recent news, current events, or facts you are unsure about. You can call this tool multiple times in parallel for different queries, or pass a "queries" array to search for multiple things in a single call.',
     parameters: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
-          description: 'The search query to look up on the web'
+          description: 'A single search query to look up on the web'
+        },
+        queries: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Multiple search queries to execute in parallel. Use this when you need to search for several different things at once.'
         }
       },
-      required: ['query']
+      required: []
     }
   }
 };
@@ -223,11 +228,17 @@ const executePerplexityWebSearch = async (query: string, config: AppConfig, sign
     const content = data.choices?.[0]?.message?.content || 'No search results found.';
 
     // Extract citations from Perplexity response
-    // Perplexity can return citations in different places
+    // Perplexity can return citations in different places:
+    // - data.citations (older/current root-level)
+    // - data.choices[0].message.citations (newer per-message level)
+    // - data.search_results (alternative format)
     const sources: Array<{ title: string; url: string; snippet?: string }> = [];
 
-    // Try root level citations
-    const citations = data.citations || data.search_results || [];
+    // Try multiple possible locations for citations
+    const citations = data.citations
+      || data.choices?.[0]?.message?.citations
+      || data.search_results
+      || [];
 
     if (Array.isArray(citations)) {
       citations.forEach((item: any, index: number) => {
@@ -1112,7 +1123,7 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
 
   // Only add web search instructions for OpenAI-format tool, not for native google_search
   const webSearchInstruction = (!useNativeGoogleSearch && webSearchEnabled)
-    ? ' The web search tool retrieves real-time information. When searching for current status (e.g. "price now", "latest news"), do NOT unnecessarily append the current month/year to the query, as this may limit results. Trust the search tool to provide the latest data. Only specify dates if searching for historical information or specific future projections. If you decide to use the web search tool, you should briefly explain what you are going to search for before calling the tool.'
+    ? ' The web search tool retrieves real-time information. When searching for current status (e.g. "price now", "latest news"), do NOT unnecessarily append the current month/year to the query, as this may limit results. Trust the search tool to provide the latest data. Only specify dates if searching for historical information or specific future projections. If you decide to use the web search tool, you should briefly explain what you are going to search for before calling the tool. You can call web_search multiple times in parallel if you need to search for different things simultaneously, or pass a "queries" array to search for multiple things in a single call.'
     : '';
 
   const dateContext = `IMPORTANT: Today's date is ${currentDateTime}.${webSearchInstruction}`;
@@ -1281,166 +1292,211 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
     while (currentToolCalls.length > 0 && iteration < MAX_TOOL_ITERATIONS) {
       iteration++;
 
-      for (const toolCall of currentToolCalls) {
-        if (toolCall.function.name === 'web_search') {
-          try {
-            const args = JSON.parse(toolCall.function.arguments);
-            // Handle both 'query' (string) and 'queries' (array) formats
-            // Some models like Gemini may return 'queries' as an array
-            let query: string;
-            if (args.query) {
-              query = args.query;
-            } else if (args.queries && Array.isArray(args.queries) && args.queries.length > 0) {
-              // Join multiple queries or use the first one
-              query = args.queries[0];
-            } else {
-              console.warn('web_search tool call missing query:', args);
-              continue; // Skip this tool call
-            }
+      try {
+        // Collect all search tasks from current tool calls
+        const searchTasks: Array<{ toolCall: any; query: string }> = [];
 
-            // Notify UI that search is starting
-            if (onWebSearch) {
-              onWebSearch({ query, isSearching: true });
-            }
-
-            // Execute web search
-            if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-            const searchResult = await executeWebSearch(query, config, signal);
-
-            // Notify UI with search results and sources - signal to start a new message for AI response
-            if (onWebSearch) {
-              onWebSearch({
-                query,
-                result: searchResult.content,
-                isSearching: false,
-                sources: searchResult.sources,
-                startNewMessage: true
-              });
-            }
-
-            // Build follow-up messages with tool result
-            const searchInstruction = `Based on the web search results above, provide an accurate and up-to-date answer. The search results contain current information - use this data to answer the user's question. Do not rely on your training data if it conflicts with the search results.`;
-
-            const followUpMessages: any[] = [
-              ...currentMessages,
-              {
-                role: 'assistant',
-                content: currentFullText || null,
-                tool_calls: [{
-                  id: toolCall.id,
-                  type: 'function',
-                  function: {
-                    name: 'web_search',
-                    arguments: toolCall.function.arguments
+        for (const toolCall of currentToolCalls) {
+          if (toolCall.function.name === 'web_search') {
+            try {
+              const args = JSON.parse(toolCall.function.arguments);
+              if (args.queries && Array.isArray(args.queries) && args.queries.length > 0) {
+                // Multiple queries in one tool call - create tasks for each
+                for (const q of args.queries) {
+                  if (typeof q === 'string' && q.trim()) {
+                    searchTasks.push({ toolCall, query: q.trim() });
                   }
-                }]
-              },
-              {
-                role: 'tool',
-                tool_call_id: toolCall.id,
-                content: `[WEB SEARCH RESULTS]\n${searchResult.content}\n\n[INSTRUCTION]\n${searchInstruction}`
-              }
-            ];
-
-            // Make follow-up call - INCLUDE TOOLS so AI can request more searches if needed
-            const followUpRequestBody: any = {
-              model: model,
-              messages: followUpMessages,
-              stream: true
-            };
-
-            // Include tools definition so AI can request more searches
-            if (useNativeGoogleSearch) {
-              followUpRequestBody.tools = [GOOGLE_SEARCH_TOOL];
-            } else {
-              followUpRequestBody.tools = [WEB_SEARCH_TOOL];
-              followUpRequestBody.tool_choice = 'auto';
-            }
-
-            const followUpResponse = await fetch(url, {
-              method: 'POST',
-              headers,
-              body: JSON.stringify(followUpRequestBody),
-              signal
-            });
-
-            if (followUpResponse.ok) {
-              // Reset for next iteration
-              let followUpText = '';
-              let followUpToolCalls: any[] = [];
-
-              const followUpContentType = followUpResponse.headers.get('content-type') || '';
-              if (followUpContentType.includes('application/json')) {
-                const data = await followUpResponse.json();
-                const choice = data.choices?.[0];
-                const content = choice?.message?.content || choice?.text || '';
-                if (content) {
-                  followUpText = content;
-                  fullText += content;
-                  onChunk(content);
                 }
-                // Check for more tool calls
-                if (choice?.message?.tool_calls) {
-                  followUpToolCalls = choice.message.tool_calls;
-                }
+              } else if (args.query && typeof args.query === 'string') {
+                searchTasks.push({ toolCall, query: args.query });
               } else {
-                await readStream(followUpResponse, (text) => {
-                  followUpText += text;
-                  fullText += text;
-                  onChunk(text);
-                }, (line) => {
-                  const trim = line.trim();
-                  if (!trim || !trim.startsWith('data: ')) return null;
-                  const dataStr = trim.slice(6);
-                  if (dataStr === '[DONE]') return null;
-                  try {
-                    const json = JSON.parse(dataStr);
-                    const choice = json.choices?.[0];
-
-                    // Check for tool calls in streaming response
-                    if (choice?.delta?.tool_calls) {
-                      for (const tc of choice.delta.tool_calls) {
-                        if (tc.index !== undefined) {
-                          if (!followUpToolCalls[tc.index]) {
-                            followUpToolCalls[tc.index] = { id: '', type: 'function', function: { name: '', arguments: '' } };
-                          }
-                          if (tc.id) followUpToolCalls[tc.index].id = tc.id;
-                          if (tc.function?.name) followUpToolCalls[tc.index].function.name = tc.function.name;
-                          if (tc.function?.arguments) followUpToolCalls[tc.index].function.arguments += tc.function.arguments;
-                        }
-                      }
-                    }
-
-                    return choice?.delta?.content || null;
-                  } catch {
-                    return null;
-                  }
-                });
+                console.warn('web_search tool call missing query:', args);
               }
-
-              // Update state for next iteration
-              currentMessages = followUpMessages;
-              currentFullText = followUpText;
-              currentToolCalls = followUpToolCalls.filter(tc => tc.function?.name === 'web_search');
-
-              // If no more tool calls, we're done
-              if (currentToolCalls.length === 0) {
-                break;
-              }
-            } else {
-              // Follow-up request failed, stop iteration
-              currentToolCalls = [];
-              break;
+            } catch {
+              console.warn('Failed to parse web_search arguments');
             }
-          } catch (e) {
-            console.error('Tool call failed:', e);
-            if (onWebSearch) {
-              onWebSearch({ query: '', result: 'Search failed', isSearching: false, sources: [] });
-            }
-            currentToolCalls = [];
-            break;
           }
         }
+
+        if (searchTasks.length === 0) {
+          break;
+        }
+
+        // Notify UI for all searches starting
+        for (const task of searchTasks) {
+          if (onWebSearch) {
+            onWebSearch({ query: task.query, isSearching: true });
+          }
+        }
+
+        // Execute all searches in parallel
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        const searchResults = await Promise.allSettled(
+          searchTasks.map(task => executeWebSearch(task.query, config, signal))
+        );
+
+        // Notify UI with all search results
+        const resolvedResults: Array<{ task: typeof searchTasks[0]; result: WebSearchResult }> = [];
+        for (let i = 0; i < searchTasks.length; i++) {
+          const task = searchTasks[i];
+          const outcome = searchResults[i];
+          const result: WebSearchResult = outcome.status === 'fulfilled'
+            ? outcome.value
+            : { content: `Search failed: ${outcome.reason?.message || 'Unknown error'}`, sources: [] };
+
+          resolvedResults.push({ task, result });
+
+          if (onWebSearch) {
+            onWebSearch({
+              query: task.query,
+              result: result.content,
+              isSearching: false,
+              sources: result.sources,
+              startNewMessage: i === searchTasks.length - 1 // start new message on last result
+            });
+          }
+        }
+
+        // Build follow-up messages with ALL tool results
+        const searchInstruction = `Based on the web search results above, provide an accurate and up-to-date answer. The search results contain current information - use this data to answer the user's question. Do not rely on your training data if it conflicts with the search results.`;
+
+        // Group results by tool call (a single tool call with queries[] may have multiple results)
+        const toolCallIds = new Set(currentToolCalls.map((tc: any) => tc.id));
+        const assistantToolCalls: any[] = [];
+        const toolMessages: any[] = [];
+
+        for (const tc of currentToolCalls) {
+          if (!toolCallIds.has(tc.id)) continue;
+
+          assistantToolCalls.push({
+            id: tc.id,
+            type: 'function',
+            function: {
+              name: 'web_search',
+              arguments: tc.function.arguments
+            }
+          });
+
+          // Combine all results for this tool call
+          const resultsForCall = resolvedResults
+            .filter(r => r.task.toolCall.id === tc.id)
+            .map(r => `[Query: ${r.task.query}]\n${r.result.content}`)
+            .join('\n\n---\n\n');
+
+          toolMessages.push({
+            role: 'tool',
+            tool_call_id: tc.id,
+            content: `[WEB SEARCH RESULTS]\n${resultsForCall}\n\n[INSTRUCTION]\n${searchInstruction}`
+          });
+        }
+
+        const followUpMessages: any[] = [
+          ...currentMessages,
+          {
+            role: 'assistant',
+            content: currentFullText || null,
+            tool_calls: assistantToolCalls
+          },
+          ...toolMessages
+        ];
+
+        // Make follow-up call - INCLUDE TOOLS so AI can request more searches if needed
+        const followUpRequestBody: any = {
+          model: model,
+          messages: followUpMessages,
+          stream: true
+        };
+
+        // Include tools definition so AI can request more searches
+        if (useNativeGoogleSearch) {
+          followUpRequestBody.tools = [GOOGLE_SEARCH_TOOL];
+        } else {
+          followUpRequestBody.tools = [WEB_SEARCH_TOOL];
+          followUpRequestBody.tool_choice = 'auto';
+        }
+
+        const followUpResponse = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(followUpRequestBody),
+          signal
+        });
+
+        if (followUpResponse.ok) {
+          // Reset for next iteration
+          let followUpText = '';
+          let followUpToolCalls: any[] = [];
+
+          const followUpContentType = followUpResponse.headers.get('content-type') || '';
+          if (followUpContentType.includes('application/json')) {
+            const data = await followUpResponse.json();
+            const choice = data.choices?.[0];
+            const content = choice?.message?.content || choice?.text || '';
+            if (content) {
+              followUpText = content;
+              fullText += content;
+              onChunk(content);
+            }
+            // Check for more tool calls
+            if (choice?.message?.tool_calls) {
+              followUpToolCalls = choice.message.tool_calls;
+            }
+          } else {
+            await readStream(followUpResponse, (text) => {
+              followUpText += text;
+              fullText += text;
+              onChunk(text);
+            }, (line) => {
+              const trim = line.trim();
+              if (!trim || !trim.startsWith('data: ')) return null;
+              const dataStr = trim.slice(6);
+              if (dataStr === '[DONE]') return null;
+              try {
+                const json = JSON.parse(dataStr);
+                const choice = json.choices?.[0];
+
+                // Check for tool calls in streaming response
+                if (choice?.delta?.tool_calls) {
+                  for (const tc of choice.delta.tool_calls) {
+                    if (tc.index !== undefined) {
+                      if (!followUpToolCalls[tc.index]) {
+                        followUpToolCalls[tc.index] = { id: '', type: 'function', function: { name: '', arguments: '' } };
+                      }
+                      if (tc.id) followUpToolCalls[tc.index].id = tc.id;
+                      if (tc.function?.name) followUpToolCalls[tc.index].function.name = tc.function.name;
+                      if (tc.function?.arguments) followUpToolCalls[tc.index].function.arguments += tc.function.arguments;
+                    }
+                  }
+                }
+
+                return choice?.delta?.content || null;
+              } catch {
+                return null;
+              }
+            });
+          }
+
+          // Update state for next iteration
+          currentMessages = followUpMessages;
+          currentFullText = followUpText;
+          currentToolCalls = followUpToolCalls.filter(tc => tc.function?.name === 'web_search');
+
+          // If no more tool calls, we're done
+          if (currentToolCalls.length === 0) {
+            break;
+          }
+        } else {
+          // Follow-up request failed, stop iteration
+          currentToolCalls = [];
+          break;
+        }
+      } catch (e) {
+        console.error('Parallel tool calls failed:', e);
+        if (onWebSearch) {
+          onWebSearch({ query: '', result: 'Search failed', isSearching: false, sources: [] });
+        }
+        currentToolCalls = [];
+        break;
       }
 
       // Only continue if there are more tool calls to process

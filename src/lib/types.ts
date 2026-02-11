@@ -31,7 +31,7 @@ export interface ChatMessage {
   responseTime?: number; // Response time in milliseconds
   reasoning?: string; // Reasoning/thinking content from models like DeepSeek
   reasoningTime?: number; // Reasoning time in seconds (persisted when interrupted)
-  webSearch?: {
+  webSearches?: Array<{
     query: string;
     result: string;
     isSearching?: boolean;
@@ -40,7 +40,7 @@ export interface ChatMessage {
       url: string;
       snippet?: string;
     }>;
-  };
+  }>;
 }
 
 export interface ApiConfig {
