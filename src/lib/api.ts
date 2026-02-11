@@ -655,6 +655,9 @@ export const callApi = async (
 
         if (signal) {
           signal.addEventListener('abort', () => {
+            // Send abort message to background instead of just disconnecting
+            // This tells background to actually stop the stream
+            chrome.runtime.sendMessage({ action: 'abort_stream' }).catch(() => { });
             port.disconnect();
             reject(new DOMException('Aborted', 'AbortError'));
           });
@@ -691,9 +694,41 @@ export const callApi = async (
       });
     }
   } else {
-    // Extension Context -> Direct Call
+    // Extension Context -> Also use port-based streaming for background continuation
     if (onChunk) {
-      return executeApiStream(messages, config, onChunk, signal, onWebSearch, onReasoning, onImage);
+      return new Promise((resolve, reject) => {
+        const port = chrome.runtime.connect({ name: 'stream_api' });
+        let fullText = '';
+
+        if (signal) {
+          signal.addEventListener('abort', () => {
+            chrome.runtime.sendMessage({ action: 'abort_stream' }).catch(() => { });
+            port.disconnect();
+            reject(new DOMException('Aborted', 'AbortError'));
+          });
+        }
+
+        port.onMessage.addListener((msg) => {
+          if (msg.done) {
+            port.disconnect();
+            resolve({ text: fullText });
+          } else if (msg.error) {
+            port.disconnect();
+            resolve({ text: fullText, error: msg.error });
+          } else if (msg.chunk) {
+            fullText += msg.chunk;
+            onChunk(msg.chunk);
+          } else if (msg.reasoning && onReasoning) {
+            onReasoning(msg.reasoning);
+          } else if (msg.webSearch && onWebSearch) {
+            onWebSearch(msg.webSearch);
+          } else if (msg.image && onImage) {
+            onImage(msg.image);
+          }
+        });
+
+        port.postMessage({ messages, config });
+      });
     } else {
       return executeApiCall(messages, config);
     }

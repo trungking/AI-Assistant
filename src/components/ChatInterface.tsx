@@ -95,38 +95,179 @@ export default function ChatInterface({
     useEffect(() => { selectedTextRef.current = selectedText; }, [selectedText]);
     useEffect(() => { selectedImageRef.current = selectedImage; }, [selectedImage]);
 
-    // Cleanup on unmount
+    // Cleanup on unmount - always save state, DON'T abort the stream
     useEffect(() => {
         return () => {
-            if (loadingRef.current && abortControllerRef.current) {
-                console.log('Aborting stream due to unmount');
-                abortControllerRef.current.abort();
-
-                // Mark last message as interrupted
-                const currentMsgs = [...messagesRef.current];
-                const lastMsg = currentMsgs[currentMsgs.length - 1];
-                if (lastMsg && lastMsg.role === 'assistant') {
-                    lastMsg.interrupted = true;
-
-                    // Calculate and save reasoning time if reasoning was happening
-                    const msgIndex = currentMsgs.length - 1;
-                    if (reasoningStartTimeRef.current[msgIndex]) {
-                        const finalElapsed = Math.floor((Date.now() - reasoningStartTimeRef.current[msgIndex]) / 1000);
-                        lastMsg.reasoningTime = finalElapsed;
-                    }
-                }
-
-                // Force save state
-                if (onStateChange) {
-                    onStateChange({
-                        instruction: instructionRef.current,
-                        messages: currentMsgs,
-                        selectedText: selectedTextRef.current,
-                        selectedImage: selectedImageRef.current
-                    });
-                }
+            // Always save current state on unmount so it can be restored
+            if (onStateChange) {
+                onStateChange({
+                    instruction: instructionRef.current,
+                    messages: [...messagesRef.current],
+                    selectedText: selectedTextRef.current,
+                    selectedImage: selectedImageRef.current
+                });
             }
         };
+    }, []);
+
+    // Reconnect to active background stream on mount
+    useEffect(() => {
+        const checkActiveStream = async () => {
+            try {
+                const storage = await chrome.storage.local.get('activeStream');
+                if (!storage.activeStream) return;
+
+                const stream = storage.activeStream as {
+                    id: string;
+                    accumulatedText: string;
+                    accumulatedReasoning: string;
+                    messages: any[];
+                    webSearches: any[];
+                    images: string[];
+                    done: boolean;
+                    error: string | null;
+                    startTime: number;
+                };
+
+                // There's an active stream - reconnect to it
+                // First, restore the original conversation messages (including user's question)
+                if (stream.messages && stream.messages.length > 0) {
+                    setMessages(stream.messages as ChatMessage[]);
+                }
+
+                setLoading(true);
+
+                // Create an AbortController so the Stop button works during reconnection
+                const reconnectController = new AbortController();
+                abortControllerRef.current = reconnectController;
+
+                const port = chrome.runtime.connect({ name: 'stream_reconnect' });
+                let reconnectedText = '';
+                let reconnectedReasoning = '';
+
+                // Handle abort from Stop button
+                reconnectController.signal.addEventListener('abort', () => {
+                    chrome.runtime.sendMessage({ action: 'abort_stream' }).catch(() => { });
+                    port.disconnect();
+                    setLoading(false);
+                    abortControllerRef.current = null;
+                    // Mark last message as interrupted
+                    setMessages(prev => {
+                        const updated = [...prev];
+                        const last = updated[updated.length - 1];
+                        if (last && last.role === 'assistant') {
+                            last.interrupted = true;
+                        }
+                        return [...updated];
+                    });
+                    chrome.runtime.sendMessage({ action: 'clear_active_stream' }).catch(() => { });
+                });
+
+                // Helper to save final state
+                const saveReconnectedState = () => {
+                    if (onStateChange) {
+                        setMessages(prev => {
+                            onStateChange({
+                                instruction: '',
+                                messages: prev,
+                                selectedText: '',
+                                selectedImage: null
+                            });
+                            return prev;
+                        });
+                    }
+                };
+
+                port.onMessage.addListener((msg) => {
+                    if (msg.reconnected) {
+                        // Stream is still running, we received buffered data
+                        // Now listen for new chunks
+                        return;
+                    }
+
+                    if (msg.chunk) {
+                        reconnectedText += msg.chunk;
+                        // Update or add the assistant message with accumulated text
+                        setMessages(prev => {
+                            const updated = [...prev];
+                            let lastAssistant = updated[updated.length - 1];
+                            if (!lastAssistant || lastAssistant.role !== 'assistant') {
+                                // Add a new assistant message
+                                lastAssistant = { role: 'assistant', content: '' };
+                                updated.push(lastAssistant);
+                            }
+                            lastAssistant.content = reconnectedText;
+                            lastAssistant.responseTime = Date.now() - stream.startTime;
+                            return [...updated];
+                        });
+                    } else if (msg.reasoning) {
+                        reconnectedReasoning += msg.reasoning;
+                        setMessages(prev => {
+                            const updated = [...prev];
+                            const last = updated[updated.length - 1];
+                            if (last && last.role === 'assistant') {
+                                last.reasoning = reconnectedReasoning;
+                            }
+                            return [...updated];
+                        });
+                    } else if (msg.webSearch) {
+                        setMessages(prev => {
+                            const updated = [...prev];
+                            const last = updated[updated.length - 1];
+                            if (last && last.role === 'assistant') {
+                                last.webSearch = {
+                                    query: msg.webSearch.query,
+                                    result: msg.webSearch.result || '',
+                                    isSearching: msg.webSearch.isSearching,
+                                    sources: msg.webSearch.sources
+                                };
+                            }
+                            return [...updated];
+                        });
+                    } else if (msg.image) {
+                        setMessages(prev => {
+                            const updated = [...prev];
+                            const last = updated[updated.length - 1];
+                            if (last && last.role === 'assistant') {
+                                if (!last.images) last.images = [];
+                                last.images.push(msg.image);
+                            }
+                            return [...updated];
+                        });
+                    } else if (msg.done) {
+                        port.disconnect();
+                        setLoading(false);
+                        abortControllerRef.current = null;
+                        // Save final state so it persists when popup is closed/reopened
+                        saveReconnectedState();
+                        // Clear the active stream from storage
+                        chrome.runtime.sendMessage({ action: 'clear_active_stream' }).catch(() => { });
+                    } else if (msg.error) {
+                        setError(msg.error);
+                        port.disconnect();
+                        setLoading(false);
+                        abortControllerRef.current = null;
+                        saveReconnectedState();
+                        chrome.runtime.sendMessage({ action: 'clear_active_stream' }).catch(() => { });
+                    } else if (msg.noStream) {
+                        // No active stream, just clean up
+                        port.disconnect();
+                        setLoading(false);
+                        abortControllerRef.current = null;
+                        chrome.storage.local.remove('activeStream');
+                    }
+                });
+
+                port.onDisconnect.addListener(() => {
+                    // If we disconnected without done, keep loading state
+                    // The stream is still running in background
+                });
+            } catch (e) {
+                console.error('Failed to check active stream:', e);
+            }
+        };
+
+        checkActiveStream();
     }, []);
 
     // Notify state changes

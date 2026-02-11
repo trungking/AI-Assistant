@@ -204,69 +204,244 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
 import { executeApiCall, executeFetchModels, executeApiStream } from '../lib/api';
 
+// --- Background Stream Continuation ---
+// Keeps track of the active background stream so it can survive popup disconnects
+let activeStreamState: {
+    id: string;
+    port: chrome.runtime.Port | null;
+    controller: AbortController;
+    accumulatedText: string;
+    accumulatedReasoning: string;
+    messages: any[]; // The conversation messages that initiated the stream
+    webSearches: any[];
+    images: string[];
+    done: boolean;
+    error: string | null;
+    startTime: number;
+} | null = null;
+
+// Save active stream state to storage so popup can recover
+const saveActiveStreamToStorage = async () => {
+    if (!activeStreamState) {
+        await chrome.storage.local.remove('activeStream');
+        return;
+    }
+    await chrome.storage.local.set({
+        activeStream: {
+            id: activeStreamState.id,
+            accumulatedText: activeStreamState.accumulatedText,
+            accumulatedReasoning: activeStreamState.accumulatedReasoning,
+            messages: activeStreamState.messages,
+            webSearches: activeStreamState.webSearches,
+            images: activeStreamState.images,
+            done: activeStreamState.done,
+            error: activeStreamState.error,
+            startTime: activeStreamState.startTime,
+        }
+    });
+};
+
+const clearActiveStream = async () => {
+    activeStreamState = null;
+    await chrome.storage.local.remove('activeStream');
+};
+
 chrome.runtime.onConnect.addListener((port) => {
     if (port.name === 'stream_api') {
         const controller = new AbortController();
+        const streamId = Date.now().toString(36) + Math.random().toString(36).slice(2);
+
+        // Create the active stream state
+        activeStreamState = {
+            id: streamId,
+            port: port,
+            controller: controller,
+            accumulatedText: '',
+            accumulatedReasoning: '',
+            messages: [],
+            webSearches: [],
+            images: [],
+            done: false,
+            error: null,
+            startTime: Date.now(),
+        };
+
+        const safeSend = (msg: any) => {
+            if (activeStreamState?.port) {
+                try {
+                    activeStreamState.port.postMessage(msg);
+                } catch (e) {
+                    // Port disconnected, stop trying to send
+                    if (activeStreamState) {
+                        activeStreamState.port = null;
+                    }
+                }
+            }
+        };
 
         port.onDisconnect.addListener(() => {
-            controller.abort();
+            // DON'T abort the stream - let it continue in background
+            if (activeStreamState && activeStreamState.id === streamId) {
+                activeStreamState.port = null;
+                // Save current state so popup can reconnect
+                saveActiveStreamToStorage();
+            }
         });
 
         port.onMessage.addListener(async (msg) => {
             if (msg.messages && msg.config) {
+                if (activeStreamState) {
+                    activeStreamState.messages = msg.messages;
+                }
+
                 try {
                     const res = await executeApiStream(
                         msg.messages,
                         msg.config,
                         (chunk) => {
-                            port.postMessage({ chunk });
+                            if (activeStreamState && activeStreamState.id === streamId) {
+                                activeStreamState.accumulatedText += chunk;
+                                safeSend({ chunk });
+                                // Periodically save to storage when port is disconnected
+                                if (!activeStreamState.port) {
+                                    saveActiveStreamToStorage();
+                                }
+                            }
                         },
                         controller.signal,
                         (webSearch) => {
-                            // Send web search status to content script
-                            try {
-                                port.postMessage({ webSearch });
-                            } catch (e) { /* ignore if disconnected */ }
+                            if (activeStreamState && activeStreamState.id === streamId) {
+                                activeStreamState.webSearches.push(webSearch);
+                                safeSend({ webSearch });
+                                if (!activeStreamState.port) {
+                                    saveActiveStreamToStorage();
+                                }
+                            }
                         },
                         (reasoning) => {
-                            // Send reasoning content to content script
-                            try {
-                                port.postMessage({ reasoning });
-                            } catch (e) { /* ignore if disconnected */ }
+                            if (activeStreamState && activeStreamState.id === streamId) {
+                                activeStreamState.accumulatedReasoning += reasoning;
+                                safeSend({ reasoning });
+                                if (!activeStreamState.port) {
+                                    saveActiveStreamToStorage();
+                                }
+                            }
                         },
                         (image) => {
-                            // Send image to content script
-                            try {
-                                port.postMessage({ image });
-                            } catch (e) { /* ignore if disconnected */ }
+                            if (activeStreamState && activeStreamState.id === streamId) {
+                                activeStreamState.images.push(image);
+                                safeSend({ image });
+                                if (!activeStreamState.port) {
+                                    saveActiveStreamToStorage();
+                                }
+                            }
                         }
                     );
 
-                    if (res.error) {
-                        // Check if still connected before posting?
-                        // Abort might have happened.
-                        try {
-                            port.postMessage({ error: res.error });
-                        } catch (e) { /* ignore */ }
-                    } else {
-                        try {
-                            port.postMessage({ done: true });
-                        } catch (e) { /* ignore */ }
+                    if (activeStreamState && activeStreamState.id === streamId) {
+                        if (res.error) {
+                            activeStreamState.error = res.error;
+                            activeStreamState.done = true;
+                            safeSend({ error: res.error });
+                        } else {
+                            activeStreamState.done = true;
+                            safeSend({ done: true });
+                        }
+                        // Save final state and then clear after a delay
+                        await saveActiveStreamToStorage();
                     }
                 } catch (e: any) {
-                    if (e.name === 'AbortError') return; // Ignore aborts
-                    try {
-                        port.postMessage({ error: e.message });
-                        port.postMessage({ done: true });
-                    } catch (err) { /* ignore */ }
+                    if (e.name === 'AbortError') {
+                        // Aborted by user (stop button)
+                        if (activeStreamState && activeStreamState.id === streamId) {
+                            activeStreamState.done = true;
+                            await saveActiveStreamToStorage();
+                        }
+                        return;
+                    }
+                    if (activeStreamState && activeStreamState.id === streamId) {
+                        activeStreamState.error = e.message;
+                        activeStreamState.done = true;
+                        safeSend({ error: e.message });
+                        safeSend({ done: true });
+                        await saveActiveStreamToStorage();
+                    }
                 }
             }
         });
+    } else if (port.name === 'stream_reconnect') {
+        // Handle reconnection from popup that was closed and reopened
+        if (activeStreamState) {
+            activeStreamState.port = port;
+
+            // Send all buffered data
+            try {
+                if (activeStreamState.accumulatedText) {
+                    port.postMessage({ chunk: activeStreamState.accumulatedText });
+                }
+                if (activeStreamState.accumulatedReasoning) {
+                    port.postMessage({ reasoning: activeStreamState.accumulatedReasoning });
+                }
+                for (const ws of activeStreamState.webSearches) {
+                    port.postMessage({ webSearch: ws });
+                }
+                for (const img of activeStreamState.images) {
+                    port.postMessage({ image: img });
+                }
+
+                if (activeStreamState.done) {
+                    if (activeStreamState.error) {
+                        port.postMessage({ error: activeStreamState.error });
+                    } else {
+                        port.postMessage({ done: true });
+                    }
+                    // Stream is done, clear it
+                    clearActiveStream();
+                } else {
+                    // Stream is still running, send a reconnected signal
+                    port.postMessage({ reconnected: true, streaming: true });
+                }
+            } catch (e) {
+                // Port failed
+                if (activeStreamState) {
+                    activeStreamState.port = null;
+                }
+            }
+
+            port.onDisconnect.addListener(() => {
+                if (activeStreamState) {
+                    activeStreamState.port = null;
+                    saveActiveStreamToStorage();
+                }
+            });
+        } else {
+            // No active stream, just notify
+            try {
+                port.postMessage({ done: true, noStream: true });
+            } catch (e) { /* ignore */ }
+        }
     }
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.action === 'open_popup_hotkey' || message.action === 'toggle_popup_hotkey') {
+    if (message.action === 'abort_stream') {
+        // Allow popup to abort the active background stream
+        if (activeStreamState && !activeStreamState.done) {
+            activeStreamState.controller.abort();
+            activeStreamState.done = true;
+            saveActiveStreamToStorage().then(() => {
+                sendResponse({ aborted: true });
+            });
+        } else {
+            sendResponse({ aborted: false });
+        }
+        return true;
+    } else if (message.action === 'clear_active_stream') {
+        clearActiveStream().then(() => {
+            sendResponse({ cleared: true });
+        });
+        return true;
+    } else if (message.action === 'open_popup_hotkey' || message.action === 'toggle_popup_hotkey') {
         // Store selection if present
         if (message.selection) {
             chrome.storage.local.set({ contextSelection: message.selection }).then(() => {

@@ -7,10 +7,26 @@ let root: Root | null = null;
 let shadowContainer: HTMLElement | null = null;
 
 export const isContentPopupOpen = (): boolean => {
+    return root !== null && shadowContainer !== null && shadowContainer.style.display !== 'none';
+};
+
+export const isContentPopupMounted = (): boolean => {
     return root !== null && shadowContainer !== null;
 };
 
 export const closeContentPopup = (): void => {
+    // Just hide the popup, don't unmount - keeps streaming running
+    if (shadowContainer) {
+        shadowContainer.style.display = 'none';
+    }
+    // Restore focus to the page so hotkeys work again
+    setTimeout(() => {
+        document.documentElement.focus();
+    }, 0);
+};
+
+export const forceCloseContentPopup = (): void => {
+    // Actually destroy the popup (for when we need fresh context)
     if (root) {
         root.unmount();
         root = null;
@@ -19,7 +35,6 @@ export const closeContentPopup = (): void => {
         shadowContainer.remove();
         shadowContainer = null;
     }
-    // Restore focus to the page so hotkeys work again
     setTimeout(() => {
         document.documentElement.focus();
     }, 0);
@@ -32,14 +47,18 @@ export const openContentPopup = (
     instruction: string = '',
     pendingAutoPrompt: PromptTemplate | null = null
 ) => {
-    // Remove existing if any
-    if (root) {
-        root.unmount();
-        root = null;
+    // If popup is already mounted and we have no new context, just show it
+    const hasNewContext = !!(selection || image || pendingAutoPrompt);
+    if (isContentPopupMounted() && !hasNewContext) {
+        if (shadowContainer) {
+            shadowContainer.style.display = '';
+        }
+        return;
     }
-    if (shadowContainer) {
-        shadowContainer.remove();
-        shadowContainer = null;
+
+    // If we have new context, force close old popup and create fresh one
+    if (isContentPopupMounted() && hasNewContext) {
+        forceCloseContentPopup();
     }
 
     // Create container
