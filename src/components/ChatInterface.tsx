@@ -129,8 +129,49 @@ export default function ChatInterface({
                     startTime: number;
                 };
 
-                // There's an active stream - reconnect to it
-                // First, restore the original conversation messages (including user's question)
+                // If the stream is already done and has accumulated text, we can
+                // reconstruct the conversation directly from storage without reconnecting.
+                // This handles the case where the background service worker restarted
+                // and lost its in-memory state.
+                if (stream.done && stream.accumulatedText) {
+                    const restoredMessages: ChatMessage[] = [
+                        ...(stream.messages || []) as ChatMessage[],
+                        {
+                            role: 'assistant' as const,
+                            content: stream.accumulatedText,
+                            reasoning: stream.accumulatedReasoning || undefined,
+                            webSearches: stream.webSearches?.length > 0 ? stream.webSearches : undefined,
+                            images: stream.images?.length > 0 ? stream.images : undefined,
+                            responseTime: stream.startTime ? Date.now() - stream.startTime : undefined,
+                        }
+                    ];
+                    setMessages(restoredMessages);
+                    // Save the restored state
+                    if (onStateChange) {
+                        onStateChange({
+                            instruction: '',
+                            messages: restoredMessages,
+                            selectedText: '',
+                            selectedImage: null
+                        });
+                    }
+                    // Clear the stale active stream record
+                    chrome.storage.local.remove('activeStream');
+                    return;
+                }
+
+                // If the stream is marked done but has no text, it's a stale/empty record.
+                // Just clean it up and keep the current messages (from popupState).
+                if (stream.done && !stream.accumulatedText) {
+                    chrome.storage.local.remove('activeStream');
+                    return;
+                }
+
+                // There's an active (in-progress) stream - reconnect to it
+                // Save original messages so we can restore if background has no stream
+                const savedMessages = [...messagesRef.current];
+
+                // Restore the original conversation messages (including user's question)
                 if (stream.messages && stream.messages.length > 0) {
                     setMessages(stream.messages as ChatMessage[]);
                 }
@@ -258,10 +299,12 @@ export default function ChatInterface({
                         saveReconnectedState();
                         chrome.runtime.sendMessage({ action: 'clear_active_stream' }).catch(() => { });
                     } else if (msg.noStream) {
-                        // No active stream, just clean up
+                        // Background service worker restarted and lost the stream.
+                        // Restore the original messages from popupState (before we overwrote them).
                         port.disconnect();
                         setLoading(false);
                         abortControllerRef.current = null;
+                        setMessages(savedMessages);
                         chrome.storage.local.remove('activeStream');
                     }
                 });
