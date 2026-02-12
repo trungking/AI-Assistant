@@ -101,6 +101,7 @@ export const useChatState = ({
 
                 // Clear any stored state since we're starting a new explicit task
                 await chrome.storage.local.remove('popupState');
+                await chrome.storage.local.remove('activeStream');
 
                 setState({
                     instruction: currentInstruction,

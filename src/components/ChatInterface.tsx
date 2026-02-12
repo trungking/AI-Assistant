@@ -114,6 +114,13 @@ export default function ChatInterface({
     useEffect(() => {
         const checkActiveStream = async () => {
             try {
+                // Skip reconnection if we have a pending auto prompt -
+                // it will start its own fresh API call
+                if (pendingAutoPrompt) {
+                    await chrome.storage.local.remove('activeStream');
+                    return;
+                }
+
                 const storage = await chrome.storage.local.get('activeStream');
                 if (!storage.activeStream) return;
 
