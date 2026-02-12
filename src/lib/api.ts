@@ -290,8 +290,8 @@ const executeGoogleWebSearch = async (query: string, config: AppConfig, signal?:
     return { content: 'Error: No API key available for web search.', sources: [] };
   }
 
-  // Use gemini-2.5-flash for Google grounding search
-  const model = 'gemini-2.5-flash';
+  // Use gemini-3-flash-preview for Google grounding search
+  const model = 'gemini-3-flash-preview';
 
   try {
     let url: string;
