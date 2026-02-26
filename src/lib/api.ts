@@ -59,6 +59,11 @@ const GOOGLE_SEARCH_TOOL = {
   google_search: {}
 };
 
+// OpenAI Native Web Search Tool Definition
+const OPENAI_WEB_SEARCH_TOOL = {
+  type: 'web_search' as const
+};
+
 /**
  * Sanitize ChatMessage array for API consumption.
  * Removes UI-only fields and filters out empty assistant messages.
@@ -407,22 +412,27 @@ const shouldEnableWebSearch = (config: AppConfig, model?: string): boolean => {
   const hasKagiSession = !!config.kagiSession;
   const hasGoogleKey = config.apiKeys['google']?.length > 0;
 
-  // Check if using a Gemini model with Google grounding search
-  // In this case, we don't need a separate Google API key because the model/provider handles it natively
-  const isGeminiModel = model ? /^gemini-\d+/.test(model) : false;
-  const usingGoogleGroundingNatively = webSearchProvider === 'google' && isGeminiModel;
-
-  // Check if current provider has API key (for fallback search)
+  // Check if current provider has API key
   const currentProvider = config.selectedProvider;
   const hasCurrentProviderKey = config.apiKeys[currentProvider]?.length > 0;
 
+  // Check if using a Gemini model with Google grounding search
+  const isGeminiModel = model ? /^gemini-\d+/.test(model) : false;
+  const usingGoogleGroundingNatively = webSearchProvider === 'google' && isGeminiModel;
+
+  // Check if using an OpenAI/GPT model with native web search (web_search_options)
+  // Works with both the built-in OpenAI provider and custom OpenAI-compatible providers
+  const isGPTModel = model ? /^(gpt-|o\d|chatgpt-)/.test(model) : false;
+  const isCustomProvider = config.customProviders?.some(cp => cp.id === currentProvider);
+  const usingOpenAINatively = isGPTModel && (currentProvider === 'openai' || !!isCustomProvider);
+
   let hasWebSearchCredentials = false;
-  if (webSearchProvider === 'kagi') {
+  if (usingOpenAINatively) {
+    // OpenAI native search: just needs an OpenAI API key (already have it)
+    hasWebSearchCredentials = true;
+  } else if (webSearchProvider === 'kagi') {
     hasWebSearchCredentials = hasKagiSession;
   } else if (webSearchProvider === 'google') {
-    // For Google grounding search:
-    // - If using a Gemini model, allow it (native support via any provider with API key)
-    // - For non-Gemini models, allow if Google API key OR current provider has API key (for fallback search)
     hasWebSearchCredentials = usingGoogleGroundingNatively || hasGoogleKey || hasCurrentProviderKey;
   } else {
     hasWebSearchCredentials = hasPerplexityKey;
@@ -1121,8 +1131,12 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
     config?.webSearchProvider === 'google' &&
     isGeminiModel;
 
-  // Only add web search instructions for OpenAI-format tool, not for native google_search
-  const webSearchInstruction = (!useNativeGoogleSearch && webSearchEnabled)
+  // Detect OpenAI native web search (GPT models on OpenAI provider)
+  const isGPTModel = /^(gpt-|o\d|chatgpt-)/.test(model);
+  const useNativeOpenAISearch = webSearchEnabled && !isOpenRouter && isGPTModel;
+
+  // Only add web search instructions for OpenAI-format function tool, not for native search
+  const webSearchInstruction = (!useNativeGoogleSearch && !useNativeOpenAISearch && webSearchEnabled)
     ? ' The web search tool retrieves real-time information. When searching for current status (e.g. "price now", "latest news"), do NOT unnecessarily append the current month/year to the query, as this may limit results. Trust the search tool to provide the latest data. Only specify dates if searching for historical information or specific future projections. If you decide to use the web search tool, you should briefly explain what you are going to search for before calling the tool. You can call web_search multiple times in parallel if you need to search for different things simultaneously, or pass a "queries" array to search for multiple things in a single call.'
     : '';
 
@@ -1144,8 +1158,11 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
     if (useNativeGoogleSearch) {
       // Use native Google grounding search for Gemini models
       requestBody.tools = [GOOGLE_SEARCH_TOOL];
+    } else if (useNativeOpenAISearch) {
+      // Use OpenAI native web search tool
+      requestBody.tools = [OPENAI_WEB_SEARCH_TOOL];
     } else {
-      // Use OpenAI-format web search tool for other models
+      // Use OpenAI-format web search function tool for other models
       requestBody.tools = [WEB_SEARCH_TOOL];
       requestBody.tool_choice = 'auto';
     }
@@ -1171,6 +1188,7 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
   let fullText = '';
   let toolCalls: any[] = [];
   let groundingSources: Array<{ title: string; url: string; snippet?: string }> = [];
+  let openAISearchAnnotations: Array<any> = [];
 
   const contentType = response.headers.get('content-type') || '';
   if (contentType.includes('application/json')) {
@@ -1197,6 +1215,11 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
           }
         });
       }
+    }
+
+    // Extract annotations for OpenAI native web search
+    if (useNativeOpenAISearch && choice?.message?.annotations) {
+      openAISearchAnnotations = choice.message.annotations;
     }
   } else {
     await readStream(response, (text) => {
@@ -1247,6 +1270,13 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
           }
         }
 
+        // Extract annotations for OpenAI native web search in streaming
+        if (useNativeOpenAISearch && choice?.delta?.annotations) {
+          for (const ann of choice.delta.annotations) {
+            openAISearchAnnotations.push(ann);
+          }
+        }
+
         // Handle reasoning_content (used by models like DeepSeek)
         const reasoningContent = choice?.delta?.reasoning_content;
         if (reasoningContent && onReasoning) {
@@ -1281,8 +1311,33 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
     });
   }
 
+  // If we have annotations from native OpenAI search, extract sources and notify UI
+  if (useNativeOpenAISearch && openAISearchAnnotations.length > 0 && onWebSearch) {
+    const sources = openAISearchAnnotations
+      .filter((a: any) => a.type === 'url_citation' && (a.url_citation || a.url))
+      .map((a: any) => {
+        const citation = a.url_citation || {};
+        return {
+          title: citation.title || 'Source',
+          url: citation.url || a.url || '',
+        };
+      })
+      // Deduplicate by URL
+      .filter((s: { title: string; url: string }, i: number, arr: { title: string; url: string }[]) => arr.findIndex(x => x.url === s.url) === i);
+
+    if (sources.length > 0) {
+      onWebSearch({
+        query: messages[messages.length - 1]?.content || '',
+        result: fullText,
+        isSearching: false,
+        sources: sources
+      });
+    }
+  }
+
   // Handle tool calls recursively - AI may request multiple web searches in sequence
-  if (toolCalls.length > 0 && config && webSearchEnabled) {
+  // Skip for native OpenAI search since it handles web search internally via web_search_options
+  if (toolCalls.length > 0 && config && webSearchEnabled && !useNativeOpenAISearch) {
     let currentToolCalls = toolCalls;
     let currentMessages = msgsWithTime;
     let currentFullText = fullText;
