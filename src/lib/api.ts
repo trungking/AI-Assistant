@@ -829,8 +829,12 @@ const getDefaultBaseUrl = (provider: string) => {
 const callGoogle = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[]): Promise<ApiResponse> => {
   const url = `${baseUrl}/models/${model}:generateContent?key=${apiKey}`;
 
+  // Separate system messages from conversation messages
+  const systemMessages = messages.filter(m => m.role === 'system');
+  const chatMessages = messages.filter(m => m.role !== 'system');
+
   // Convert standard messages to Gemini format
-  const contents = messages.map(m => {
+  const contents = chatMessages.map(m => {
     const parts: any[] = [{ text: m.content }];
     if (m.image) {
       const imagePart = parseImageForGemini(m.image);
@@ -844,12 +848,20 @@ const callGoogle = async (apiKey: string, baseUrl: string, model: string, messag
     };
   });
 
+  const requestBody: any = { contents };
+
+  // Add system instruction if present
+  if (systemMessages.length > 0) {
+    const systemText = systemMessages.map(m => m.content).join('\n\n');
+    requestBody.systemInstruction = {
+      parts: [{ text: systemText }]
+    };
+  }
+
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: contents
-    })
+    body: JSON.stringify(requestBody)
   });
 
   if (!response.ok) {
@@ -858,7 +870,10 @@ const callGoogle = async (apiKey: string, baseUrl: string, model: string, messag
   }
 
   const data = await response.json();
-  return { text: data.candidates?.[0]?.content?.parts?.[0]?.text || '' };
+  // Extract text from all parts
+  const parts = data.candidates?.[0]?.content?.parts;
+  const text = parts?.filter((p: any) => p.text).map((p: any) => p.text).join('') || '';
+  return { text };
 };
 
 const callOpenAI = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[]): Promise<ApiResponse> => {
@@ -1723,13 +1738,19 @@ const streamPerplexity = async (apiKey: string, baseUrl: string, model: string, 
 };
 
 const streamGoogle = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, signal?: AbortSignal, config?: AppConfig, onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void, _onReasoning?: (text: string) => void, onImage?: (imageUrl: string) => void): Promise<ApiResponse> => {
-  // API: POST https://.../streamGenerateContent?key=...
-  const url = `${baseUrl}/models/${model}:streamGenerateContent?key=${apiKey}`;
+  // API: POST https://.../streamGenerateContent?key=...&alt=sse
+  // Using alt=sse for Server-Sent Events format which is more reliable than JSON array streaming
+  const url = `${baseUrl}/models/${model}:streamGenerateContent?key=${apiKey}&alt=sse`;
 
   // Sanitize messages to remove UI-only fields and filter empty messages
   const sanitizedMessages = sanitizeMessagesForApi(messages);
 
-  const contents = sanitizedMessages.map(m => {
+  // Separate system messages from conversation messages
+  // Gemini API uses systemInstruction for system-level context
+  const systemMessages = sanitizedMessages.filter(m => m.role === 'system');
+  const chatMessages = sanitizedMessages.filter(m => m.role !== 'system');
+
+  const contents = chatMessages.map(m => {
     const parts: any[] = [{ text: m.content }];
     if (m.image) {
       const imagePart = parseImageForGemini(m.image);
@@ -1754,6 +1775,14 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
 
   const requestBody: any = { contents };
 
+  // Add system instruction if present
+  if (systemMessages.length > 0) {
+    const systemText = systemMessages.map(m => m.content).join('\n\n');
+    requestBody.systemInstruction = {
+      parts: [{ text: systemText }]
+    };
+  }
+
   // Add google_search tool for native grounding
   if (useGoogleSearch) {
     requestBody.tools = [GOOGLE_SEARCH_TOOL];
@@ -1767,145 +1796,145 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
   });
 
   if (!response.ok) {
-    const err = await response.json();
-    throw new Error(err.error?.message || response.statusText);
+    const err = await response.text();
+    try {
+      const jsonErr = JSON.parse(err);
+      throw new Error(jsonErr.error?.message || response.statusText);
+    } catch {
+      throw new Error(err || response.statusText);
+    }
   }
 
   let fullText = '';
   let groundingSources: Array<{ title: string; url: string; snippet?: string }> = [];
 
   const contentType = response.headers.get('content-type') || '';
-  if (contentType.includes('application/json')) {
-    const data = await response.json();
-    fullText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    if (fullText) onChunk(fullText);
 
-    // Extract grounding metadata if available
-    if (useGoogleSearch) {
-      const groundingMetadata = data.candidates?.[0]?.groundingMetadata;
-      if (groundingMetadata?.groundingChunks) {
-        groundingMetadata.groundingChunks.forEach((chunk: any) => {
-          if (chunk.web) {
-            groundingSources.push({
-              title: chunk.web.title || 'Source',
-              url: chunk.web.uri || '',
-              snippet: chunk.web.snippet
-            });
-          }
-        });
-      }
-
-      // Notify about grounding sources if we have onWebSearch callback
-      if (onWebSearch && groundingSources.length > 0) {
-        onWebSearch({
-          query: messages[messages.length - 1]?.content || '',
-          result: fullText,
-          isSearching: false,
-          sources: groundingSources
-        });
-      }
-    }
-
-    return { text: fullText };
-  }
-
-  // Google returns a JSON array: [ {...}, {...} ] but streamed.
-  // It's not SSE. It's just a broken up JSON array.
-  // However, usually each chunk (candidate) is a valid JSON object surrounded by commas/brackets.
-  // Simple parser: accumulate text, look for "text": "..."
-  // Or simpler: The chunks are actually usually well-behaved valid JSON if we strip the outer array structure or handle it.
-  // Actually, `response.body` will deliver bytes.
-  // Let's use a simpler heuristic for Google since proper JSON stream parsing is complex.
-  // We can regex for `"text": "..."` in the full buffer or chunks? No, that's unsafe.
-
-  // Better approach: Google's stream sends distinct JSON objects corresponding to `GenerateContentResponse`,
-  // possibly separated by commas and enclosed in brackets.
-  // Format:
-  // [
-  // { ... },
-  // { ... }
-  // ]
-
-  // We can accumulate buffer, find matching braces { }, parse, and move forward.
-
-  const reader = response.body?.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  if (!reader) throw new Error('No body');
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    let braceCount = 0;
-    let start = -1;
-    let consumedUpTo = 0;
-
-    for (let i = 0; i < buffer.length; i++) {
-      const char = buffer[i];
-      if (char === '{') {
-        if (braceCount === 0) start = i;
-        braceCount++;
-      } else if (char === '}') {
-        braceCount--;
-        if (braceCount === 0 && start !== -1) {
-          // Process object
-          const jsonStr = buffer.substring(start, i + 1);
-          try {
-            const json = JSON.parse(jsonStr);
-            const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (text) {
-              fullText += text;
-              onChunk(text);
-            }
-
-            // Extract images from parts if present
-            if (onImage) {
-              const parts = json.candidates?.[0]?.content?.parts;
-              if (parts && Array.isArray(parts)) {
-                for (const part of parts) {
-                  if (part.inlineData && part.inlineData.mimeType && part.inlineData.data) {
-                    // Convert base64 image to data URL
-                    const imageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-                    onImage(imageUrl);
-                  }
-                }
-              }
-            }
-
-            // Extract grounding metadata from streaming response
-            if (useGoogleSearch) {
-              const groundingMetadata = json.candidates?.[0]?.groundingMetadata;
-              if (groundingMetadata?.groundingChunks) {
-                groundingMetadata.groundingChunks.forEach((chunk: any) => {
-                  if (chunk.web) {
-                    // Check if we already have this source to avoid duplicates
-                    const exists = groundingSources.some(s => s.url === chunk.web.uri);
-                    if (!exists) {
-                      groundingSources.push({
-                        title: chunk.web.title || 'Source',
-                        url: chunk.web.uri || '',
-                        snippet: chunk.web.snippet
-                      });
-                    }
-                  }
-                });
-              }
-            }
-          } catch (e) {
-            // ignore malformed
-          }
-          start = -1;
-          consumedUpTo = i + 1;
+  // Helper to process a single Gemini response object (candidate)
+  const processGeminiResponse = (json: any) => {
+    // Extract text from all parts
+    const parts = json.candidates?.[0]?.content?.parts;
+    if (parts && Array.isArray(parts)) {
+      for (const part of parts) {
+        if (part.text) {
+          fullText += part.text;
+          onChunk(part.text);
+        }
+        // Extract images from inline data
+        if (onImage && part.inlineData && part.inlineData.mimeType && part.inlineData.data) {
+          const imageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+          onImage(imageUrl);
         }
       }
     }
 
-    // Remove processed parts
-    if (consumedUpTo > 0) {
-      buffer = buffer.substring(consumedUpTo);
+    // Extract grounding metadata
+    if (useGoogleSearch) {
+      const groundingMetadata = json.candidates?.[0]?.groundingMetadata;
+      if (groundingMetadata?.groundingChunks) {
+        groundingMetadata.groundingChunks.forEach((chunk: any) => {
+          if (chunk.web) {
+            const exists = groundingSources.some(s => s.url === chunk.web.uri);
+            if (!exists) {
+              groundingSources.push({
+                title: chunk.web.title || 'Source',
+                url: chunk.web.uri || '',
+                snippet: chunk.web.snippet
+              });
+            }
+          }
+        });
+      }
+    }
+  };
+
+  if (contentType.includes('text/event-stream')) {
+    // SSE format (alt=sse): each event is "data: {json}\n\n"
+    await readStream(response, (_text) => {
+      // onChunk is called inside processGeminiResponse
+    }, (line) => {
+      const trim = line.trim();
+      if (!trim || !trim.startsWith('data: ')) return null;
+
+      const dataStr = trim.slice(6);
+      try {
+        const json = JSON.parse(dataStr);
+        processGeminiResponse(json);
+      } catch (e) {
+        // ignore malformed lines
+      }
+      return null; // We handle onChunk inside processGeminiResponse directly
+    });
+  } else if (contentType.includes('application/json')) {
+    // JSON response - could be a single object or an array of objects
+    const data = await response.json();
+
+    if (Array.isArray(data)) {
+      // Array of GenerateContentResponse objects (streamGenerateContent without alt=sse)
+      for (const item of data) {
+        processGeminiResponse(item);
+      }
+    } else {
+      // Single response object
+      processGeminiResponse(data);
+    }
+  } else {
+    // Fallback: try to parse as JSON array stream using brace-matching
+    const reader = response.body?.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    if (!reader) throw new Error('No body');
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      let braceCount = 0;
+      let inString = false;
+      let escape = false;
+      let start = -1;
+      let consumedUpTo = 0;
+
+      for (let i = 0; i < buffer.length; i++) {
+        const char = buffer[i];
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (char === '\\' && inString) {
+          escape = true;
+          continue;
+        }
+        if (char === '"') {
+          inString = !inString;
+          continue;
+        }
+        if (inString) continue;
+
+        if (char === '{') {
+          if (braceCount === 0) start = i;
+          braceCount++;
+        } else if (char === '}') {
+          braceCount--;
+          if (braceCount === 0 && start !== -1) {
+            const jsonStr = buffer.substring(start, i + 1);
+            try {
+              const json = JSON.parse(jsonStr);
+              processGeminiResponse(json);
+            } catch (e) {
+              // ignore malformed
+            }
+            start = -1;
+            consumedUpTo = i + 1;
+          }
+        }
+      }
+
+      if (consumedUpTo > 0) {
+        buffer = buffer.substring(consumedUpTo);
+      }
     }
   }
 
