@@ -73,6 +73,7 @@ export interface AppConfig {
   kagiSession?: string; // Kagi session cookie for web search
   alwaysExpandReasoning?: boolean; // Always expand reasoning content
   backupModels?: Record<string, Array<{ provider: string; model: string }>>;  // Backup models for quick retry
+  visionModel?: { provider: string; model: string } | null; // Fallback model for vision/image requests
 }
 
 export const DEFAULT_PROMPTS: PromptTemplate[] = [
@@ -115,5 +116,6 @@ export const DEFAULT_CONFIG: AppConfig = {
   webSearchProvider: 'perplexity',
   kagiSession: '',
   alwaysExpandReasoning: false,
-  backupModels: {}
+  backupModels: {},
+  visionModel: null
 };

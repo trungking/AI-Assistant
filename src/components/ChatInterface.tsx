@@ -1116,15 +1116,27 @@ export default function ChatInterface({
                 });
             });
 
-            // Check for multimodal error when using a model that doesn't support images
-            if (res.error && messagePayload.image) {
-                const isMultimodalError = res.error.toLowerCase().includes('content must be a string') ||
-                    res.error.toLowerCase().includes('must be a string') ||
-                    res.error.includes('.content must be a string');
+            // Check for errors when images are present - fall back to vision model
+            // This handles cases where the model doesn't support images (various error messages)
+            const hasImageInConversation = newMessages.some(m => m.image);
+            if (res.error && hasImageInConversation && activeConfig.visionModel) {
+                const visionModel = activeConfig.visionModel;
+                // Don't fallback to the same provider+model that just failed
+                const isSameModel = visionModel.provider === activeConfig.selectedProvider &&
+                    visionModel.model === activeConfig.selectedModel[activeConfig.selectedProvider];
 
-                if (isMultimodalError) {
-                    // Fallback to default config - model doesn't support images
-                    console.log('Prompt model does not support images, falling back to default model');
+                if (!isSameModel) {
+                    console.log(`Image request failed (${res.error}), falling back to vision model: ${visionModel.provider}/${visionModel.model}`);
+
+                    // Build fallback config using the vision model
+                    const visionConfig: AppConfig = {
+                        ...activeConfig,
+                        selectedProvider: visionModel.provider,
+                        selectedModel: {
+                            ...activeConfig.selectedModel,
+                            [visionModel.provider]: visionModel.model
+                        }
+                    };
 
                     // Reset accumulated text for retry
                     accumulatedText = '';
@@ -1145,8 +1157,8 @@ export default function ChatInterface({
                     // Create new abort controller for retry
                     abortControllerRef.current = new AbortController();
 
-                    // Retry with original config (before any prompt model overrides)
-                    const fallbackRes = await callApi(newMessages, initialConfig, (chunk) => {
+                    // Retry with vision model config
+                    const fallbackRes = await callApi(newMessages, visionConfig, (chunk) => {
                         accumulatedText += chunk;
                         const currentResponseTime = Date.now() - startTime;
                         setMessages(prev => {
