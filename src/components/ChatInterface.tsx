@@ -921,7 +921,7 @@ export default function ChatInterface({
 
     const handleSubmit = async (overrideInstruction?: string, overrideConfig?: AppConfig) => {
         const textToSubmit = overrideInstruction !== undefined ? overrideInstruction : instruction;
-        const activeConfig = overrideConfig || config;
+        let activeConfig = overrideConfig || config;
 
         if (!textToSubmit.trim()) return;
 
@@ -970,6 +970,10 @@ export default function ChatInterface({
 
         // Add placeholder assistant message
         const assistantMsg: ChatMessage = { role: 'assistant', content: '' };
+        // Track which model is used when a prompt overrides the default model
+        if (overrideConfig) {
+            assistantMsg.modelUsed = activeConfig.selectedModel[activeConfig.selectedProvider];
+        }
         setMessages([...newMessages, assistantMsg]);
 
         // Scroll to bottom when user sends a message
@@ -1007,7 +1011,7 @@ export default function ChatInterface({
         };
 
         try {
-            const res = await callApi(newMessages, activeConfig, (chunk) => {
+            let res = await callApi(newMessages, activeConfig, (chunk) => {
                 const msgIndex = newMessages.length; // Index of the assistant message
 
                 // Finalize reasoning timer on first content chunk
@@ -1115,6 +1119,130 @@ export default function ChatInterface({
                     return updated;
                 });
             });
+
+            // Fallback: If the request used a prompt-specific override model and got an error,
+            // retry with the primary model before trying other fallbacks
+            if (res.error && overrideConfig) {
+                const isSameAsPrimary = config.selectedProvider === activeConfig.selectedProvider &&
+                    config.selectedModel[config.selectedProvider] === activeConfig.selectedModel[activeConfig.selectedProvider];
+
+                if (!isSameAsPrimary) {
+                    console.log(`Prompt override model failed (${res.error}), retrying with primary model: ${config.selectedProvider}/${config.selectedModel[config.selectedProvider]}`);
+
+                    // Reset accumulated text for retry
+                    accumulatedText = '';
+                    accumulatedReasoning = '';
+                    isInNewMessage = false;
+                    reasoningFinalized = false;
+
+                    // Reset the assistant message
+                    setMessages(prev => {
+                        const updated = [...prev];
+                        const last = updated[updated.length - 1];
+                        if (last && last.role === 'assistant') {
+                            last.content = '';
+                            last.reasoning = undefined;
+                            last.webSearches = undefined;
+                            last.images = undefined;
+                            last.modelUsed = undefined; // No longer using override model
+                        }
+                        return updated;
+                    });
+
+                    // Create new abort controller for retry
+                    abortControllerRef.current = new AbortController();
+
+                    // Retry with primary config
+                    const primaryRetryRes = await callApi(newMessages, config, (chunk) => {
+                        const msgIndex = newMessages.length;
+                        finalizeReasoningTimer(msgIndex);
+
+                        accumulatedText += chunk;
+                        const currentResponseTime = Date.now() - startTime;
+                        setMessages(prev => {
+                            const updated = [...prev];
+                            const last = updated[updated.length - 1];
+                            if (last && last.role === 'assistant') {
+                                last.content = accumulatedText;
+                                last.responseTime = currentResponseTime;
+                            }
+                            return updated;
+                        });
+                    }, abortControllerRef.current.signal, (searchStatus) => {
+                        const searchEntry = {
+                            query: searchStatus.query,
+                            result: searchStatus.result || '',
+                            isSearching: searchStatus.isSearching,
+                            sources: searchStatus.sources
+                        };
+                        if (searchStatus.startNewMessage) {
+                            accumulatedText = '';
+                            accumulatedReasoning = '';
+                            setMessages(prev => {
+                                const updated = [...prev];
+                                const prevLast = updated[updated.length - 1];
+                                if (prevLast && prevLast.role === 'assistant') {
+                                    if (!prevLast.webSearches) prevLast.webSearches = [];
+                                    const existingIdx = prevLast.webSearches.findIndex(s => s.query === searchEntry.query);
+                                    if (existingIdx >= 0) {
+                                        prevLast.webSearches[existingIdx] = { ...searchEntry, isSearching: false };
+                                    } else {
+                                        prevLast.webSearches.push({ ...searchEntry, isSearching: false });
+                                    }
+                                }
+                                return [...updated, { role: 'assistant', content: '' }];
+                            });
+                            isInNewMessage = true;
+                        } else {
+                            setMessages(prev => {
+                                const updated = [...prev];
+                                const last = updated[updated.length - 1];
+                                if (last && last.role === 'assistant') {
+                                    if (!last.webSearches) last.webSearches = [];
+                                    const existingIdx = last.webSearches.findIndex(s => s.query === searchEntry.query);
+                                    if (existingIdx >= 0) {
+                                        last.webSearches[existingIdx] = searchEntry;
+                                    } else {
+                                        last.webSearches.push(searchEntry);
+                                    }
+                                }
+                                return updated;
+                            });
+                        }
+                    }, (reasoningChunk) => {
+                        accumulatedReasoning += reasoningChunk;
+                        const msgIndex = newMessages.length;
+                        if (accumulatedReasoning === reasoningChunk) {
+                            const reasoningStart = Date.now();
+                            reasoningStartTimeRef.current[msgIndex] = reasoningStart;
+                            setReasoningStartTime(prev => ({ ...prev, [msgIndex]: reasoningStart }));
+                        }
+                        setMessages(prev => {
+                            const updated = [...prev];
+                            const last = updated[updated.length - 1];
+                            if (last && last.role === 'assistant') {
+                                last.reasoning = accumulatedReasoning;
+                            }
+                            return updated;
+                        });
+                    }, (imageUrl) => {
+                        setMessages(prev => {
+                            const updated = [...prev];
+                            const last = updated[updated.length - 1];
+                            if (last && last.role === 'assistant') {
+                                if (!last.images) last.images = [];
+                                last.images.push(imageUrl);
+                            }
+                            return updated;
+                        });
+                    });
+
+                    // If primary model also failed, use res reference for further fallbacks
+                    res = primaryRetryRes;
+                    // Update activeConfig reference for vision fallback check below
+                    activeConfig = config;
+                }
+            }
 
             // Check for errors when images are present - fall back to vision model
             // This handles cases where the model doesn't support images (various error messages)
@@ -1876,6 +2004,13 @@ export default function ChatInterface({
                                         <div className="flex items-center gap-1 text-[10px] text-slate-400 dark:text-slate-500">
                                             <Clock size={10} />
                                             <span>{(msg.responseTime / 1000).toFixed(1)}s</span>
+                                        </div>
+                                    )}
+                                    {/* Model used indicator (when prompt override model was used) */}
+                                    {msg.modelUsed && (
+                                        <div className="flex items-center gap-1 text-[10px] text-slate-400 dark:text-slate-500">
+                                            <Bot size={10} />
+                                            <span>{msg.modelUsed}</span>
                                         </div>
                                     )}
                                     {/* Try with another model button */}

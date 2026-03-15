@@ -31,6 +31,7 @@ export interface ChatMessage {
   responseTime?: number; // Response time in milliseconds
   reasoning?: string; // Reasoning/thinking content from models like DeepSeek
   reasoningTime?: number; // Reasoning time in seconds (persisted when interrupted)
+  modelUsed?: string; // Model name used for this response (shown when override model is used)
   webSearches?: Array<{
     query: string;
     result: string;
