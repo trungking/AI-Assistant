@@ -417,7 +417,7 @@ const shouldEnableWebSearch = (config: AppConfig, model?: string): boolean => {
   const hasCurrentProviderKey = config.apiKeys[currentProvider]?.length > 0;
 
   // Check if using a Gemini model with Google grounding search
-  const isGeminiModel = model ? /^gemini-\d+/.test(model) : false;
+  const isGeminiModel = model ? /^gemini-/.test(model) : false;
   const usingGoogleGroundingNatively = webSearchProvider === 'google' && isGeminiModel;
 
   // Check if using an OpenAI/GPT model with native web search (web_search_options)
@@ -1141,7 +1141,7 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
 
   // Detect web search configuration early to conditionally add instructions
   const webSearchEnabled = config && shouldEnableWebSearch(config, model);
-  const isGeminiModel = /^gemini-\d+/.test(model);
+  const isGeminiModel = /^gemini-/.test(model);
   const useNativeGoogleSearch = webSearchEnabled &&
     config?.webSearchProvider === 'google' &&
     isGeminiModel;
