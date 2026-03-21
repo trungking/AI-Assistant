@@ -1668,12 +1668,13 @@ export default function ChatInterface({
                         <div className={`shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${msg.role === 'user' ? 'bg-slate-200 dark:bg-gpt-hover text-slate-500 dark:text-gpt-text' : 'bg-blue-600 text-white'}`}>
                             {msg.role === 'user' ? <User size={14} /> : <Bot size={14} />}
                         </div>
-                        <div className={`relative group max-w-[85%] p-3 rounded-2xl text-sm shadow-sm dark:shadow-none ${msg.role === 'user'
+                        <div className="flex flex-col max-w-[85%]">
+                        <div className={`relative group p-3 rounded-2xl text-sm shadow-sm dark:shadow-none ${msg.role === 'user'
                             ? 'bg-white dark:bg-gpt-input text-slate-800 dark:text-gpt-text border border-slate-200 dark:border-gpt-hover rounded-tr-none'
                             : 'bg-white dark:bg-transparent text-slate-800 dark:text-gpt-text border border-slate-200 dark:border-none rounded-tl-none px-0 py-0'
                             }`}>
                             {msg.role === 'assistant' ? (
-                                <div className={clsx("prose prose-sm max-w-none prose-slate dark:prose-invert prose-pre:bg-slate-100 dark:prose-pre:bg-gpt-sidebar prose-pre:p-2 prose-pre:rounded-lg mb-4",
+                                <div className={clsx("prose prose-sm max-w-none prose-slate dark:prose-invert prose-pre:bg-slate-100 dark:prose-pre:bg-gpt-sidebar prose-pre:p-2 prose-pre:rounded-lg mb-1",
                                     "dark:px-0 dark:py-0 px-1"
                                 )}>
                                     {/* Reasoning Section - shown when reasoning content exists */}
@@ -1978,7 +1979,7 @@ export default function ChatInterface({
                                     </div>
                                 </div>
                             )}
-                            {/* Only show copy button when response is complete */}
+                            {/* Copy button - same for both user and assistant */}
                             {!(loading && idx === messages.length - 1) && msg.content && (
                                 <button
                                     onClick={() => {
@@ -1987,7 +1988,8 @@ export default function ChatInterface({
                                         setTimeout(() => setCopiedIndex(null), 2000);
                                     }}
                                     className={clsx(
-                                        "absolute bottom-1 right-1 p-1 rounded-md transition-all duration-200",
+                                        "absolute right-1 p-1 rounded-md transition-all duration-200",
+                                        msg.role === 'user' ? "bottom-1" : "-bottom-1",
                                         "opacity-0 group-hover:opacity-100 focus:opacity-100",
                                         "hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
                                     )}
@@ -1996,88 +1998,89 @@ export default function ChatInterface({
                                     {copiedIndex === idx ? <Check size={12} className="text-green-500" /> : <Copy size={12} />}
                                 </button>
                             )}
-                            {/* Response time and retry button row */}
-                            {msg.role === 'assistant' && msg.content && !(loading && idx === messages.length - 1) && (
-                                <div className="flex items-center gap-2 mt-2">
-                                    {/* Response time */}
-                                    {msg.responseTime !== undefined && (
-                                        <div className="flex items-center gap-1 text-[10px] text-slate-400 dark:text-slate-500">
-                                            <Clock size={10} />
-                                            <span>{(msg.responseTime / 1000).toFixed(1)}s</span>
-                                        </div>
-                                    )}
-                                    {/* Model used indicator (when prompt override model was used) */}
-                                    {msg.modelUsed && (
-                                        <div className="flex items-center gap-1 text-[10px] text-slate-400 dark:text-slate-500">
-                                            <Bot size={10} />
-                                            <span>{msg.modelUsed}</span>
-                                        </div>
-                                    )}
-                                    {/* Try with another model button */}
-                                    <div className="relative" ref={retryModelMenuOpen === idx ? retryModelMenuRef : null}>
-                                        <button
-                                            onClick={() => setRetryModelMenuOpen(retryModelMenuOpen === idx ? null : idx)}
-                                            className="p-1 text-slate-400 dark:text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition-colors"
-                                            title="Try with another model"
-                                        >
-                                            <RefreshCw size={12} />
-                                        </button>
-
-                                        {/* Backup models dropdown */}
-                                        {retryModelMenuOpen === idx && config.backupModels && (
-                                            <div className="absolute bottom-full left-0 mb-1 w-56 max-h-64 overflow-y-auto bg-white dark:bg-gpt-sidebar border border-slate-200 dark:border-gpt-hover rounded-xl shadow-xl z-50 custom-scrollbar">
-                                                <div className="py-1">
-                                                    {(() => {
-                                                        // Collect all backup models from all providers
-                                                        const allBackups = Object.entries(config.backupModels).flatMap(([provider, models]) =>
-                                                            models.map(m => ({ ...m, fromProvider: provider }))
-                                                        );
-
-                                                        if (allBackups.length === 0) {
-                                                            return (
-                                                                <div className="px-4 py-3 text-xs text-slate-500 text-center">
-                                                                    No backup models configured.<br />
-                                                                    <span className="text-[10px]">Add them in Settings</span>
-                                                                </div>
-                                                            );
-                                                        }
-
-                                                        // Group by provider
-                                                        const groupedBackups = allBackups.reduce((acc, backup) => {
-                                                            if (!acc[backup.provider]) {
-                                                                acc[backup.provider] = [];
-                                                            }
-                                                            acc[backup.provider].push(backup);
-                                                            return acc;
-                                                        }, {} as Record<string, typeof allBackups>);
-
-                                                        return Object.entries(groupedBackups).map(([provider, models]) => (
-                                                            <div key={provider} className="mb-1 last:mb-0">
-                                                                <div className="px-3 py-1 text-[10px] font-bold text-slate-400 dark:text-gpt-secondary uppercase tracking-wider">
-                                                                    {(() => {
-                                                                        const custom = config.customProviders?.find(cp => cp.id === provider);
-                                                                        return custom ? custom.name : (ProviderDisplayNames[provider] || provider);
-                                                                    })()}
-                                                                </div>
-                                                                {models.map((backup, backupIdx) => (
-                                                                    <button
-                                                                        key={`${backup.provider}-${backup.model}-${backupIdx}`}
-                                                                        onClick={() => handleRetryWithModel(idx, backup.provider, backup.model)}
-                                                                        className="w-full text-left px-4 py-2 text-xs text-slate-700 dark:text-gpt-text hover:bg-slate-50 dark:hover:bg-gpt-hover transition-colors"
-                                                                    >
-                                                                        <div className="truncate">{backup.model}</div>
-                                                                    </button>
-                                                                ))}
-                                                            </div>
-                                                        ));
-                                                    })()}
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            )}
                         </div>
+                        {/* Status line - outside the message box */}
+                        {msg.role === 'assistant' && msg.content && !(loading && idx === messages.length - 1) && (
+                            <div className="flex items-center gap-2">
+                                {/* Response time */}
+                                {msg.responseTime !== undefined && (
+                                    <div className="flex items-center gap-1 text-[10px] text-slate-400 dark:text-slate-500">
+                                        <Clock size={10} />
+                                        <span>{(msg.responseTime / 1000).toFixed(1)}s</span>
+                                    </div>
+                                )}
+                                {/* Model used indicator (when prompt override model was used) */}
+                                {msg.modelUsed && (
+                                    <div className="flex items-center gap-1 text-[10px] text-slate-400 dark:text-slate-500">
+                                        <Bot size={10} />
+                                        <span>{msg.modelUsed}</span>
+                                    </div>
+                                )}
+                                {/* Try with another model button */}
+                                <div className="relative" ref={retryModelMenuOpen === idx ? retryModelMenuRef : null}>
+                                    <button
+                                        onClick={() => setRetryModelMenuOpen(retryModelMenuOpen === idx ? null : idx)}
+                                        className="p-1 text-slate-400 dark:text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition-colors"
+                                        title="Try with another model"
+                                    >
+                                        <RefreshCw size={12} />
+                                    </button>
+
+                                    {/* Backup models dropdown */}
+                                    {retryModelMenuOpen === idx && config.backupModels && (
+                                        <div className="absolute bottom-full left-0 mb-1 w-56 max-h-64 overflow-y-auto bg-white dark:bg-gpt-sidebar border border-slate-200 dark:border-gpt-hover rounded-xl shadow-xl z-50 custom-scrollbar">
+                                            <div className="py-1">
+                                                {(() => {
+                                                    // Collect all backup models from all providers
+                                                    const allBackups = Object.entries(config.backupModels).flatMap(([provider, models]) =>
+                                                        models.map(m => ({ ...m, fromProvider: provider }))
+                                                    );
+
+                                                    if (allBackups.length === 0) {
+                                                        return (
+                                                            <div className="px-4 py-3 text-xs text-slate-500 text-center">
+                                                                No backup models configured.<br />
+                                                                <span className="text-[10px]">Add them in Settings</span>
+                                                            </div>
+                                                        );
+                                                    }
+
+                                                    // Group by provider
+                                                    const groupedBackups = allBackups.reduce((acc, backup) => {
+                                                        if (!acc[backup.provider]) {
+                                                            acc[backup.provider] = [];
+                                                        }
+                                                        acc[backup.provider].push(backup);
+                                                        return acc;
+                                                    }, {} as Record<string, typeof allBackups>);
+
+                                                    return Object.entries(groupedBackups).map(([provider, models]) => (
+                                                        <div key={provider} className="mb-1 last:mb-0">
+                                                            <div className="px-3 py-1 text-[10px] font-bold text-slate-400 dark:text-gpt-secondary uppercase tracking-wider">
+                                                                {(() => {
+                                                                    const custom = config.customProviders?.find(cp => cp.id === provider);
+                                                                    return custom ? custom.name : (ProviderDisplayNames[provider] || provider);
+                                                                })()}
+                                                            </div>
+                                                            {models.map((backup, backupIdx) => (
+                                                                <button
+                                                                    key={`${backup.provider}-${backup.model}-${backupIdx}`}
+                                                                    onClick={() => handleRetryWithModel(idx, backup.provider, backup.model)}
+                                                                    className="w-full text-left px-4 py-2 text-xs text-slate-700 dark:text-gpt-text hover:bg-slate-50 dark:hover:bg-gpt-hover transition-colors"
+                                                                >
+                                                                    <div className="truncate">{backup.model}</div>
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    ));
+                                                })()}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                    </div>
                     </div>
                 ))}
 
