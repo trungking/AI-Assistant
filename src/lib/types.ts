@@ -75,6 +75,7 @@ export interface AppConfig {
   alwaysExpandReasoning?: boolean; // Always expand reasoning content
   backupModels?: Record<string, Array<{ provider: string; model: string }>>;  // Backup models for quick retry
   visionModel?: { provider: string; model: string } | null; // Fallback model for vision/image requests
+  systemPrompt?: string; // Custom system prompt for all conversations
 }
 
 export const DEFAULT_PROMPTS: PromptTemplate[] = [
@@ -118,5 +119,6 @@ export const DEFAULT_CONFIG: AppConfig = {
   kagiSession: '',
   alwaysExpandReasoning: false,
   backupModels: {},
-  visionModel: null
+  visionModel: null,
+  systemPrompt: 'You are a helpful assistant.\n\nToday\'s date is ${date}.'
 };

@@ -85,6 +85,27 @@ const sanitizeMessagesForApi = (messages: ChatMessage[]): Array<{ role: string; 
     });
 };
 
+const formatDate = (date: Date = new Date()): string => {
+  return new Intl.DateTimeFormat('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric'
+  }).format(date);
+};
+
+const getSystemPrompt = (config: AppConfig): string => {
+  const prompt = config.systemPrompt?.trim() || 'You are a helpful assistant.';
+  return prompt.replace(/\${date}/g, formatDate());
+};
+
+const injectSystemPrompt = (messages: ChatMessage[], config: AppConfig): ChatMessage[] => {
+  if (messages.some(m => m.role === 'system')) {
+    return messages;
+  }
+  return [{ role: 'system', content: getSystemPrompt(config) }, ...messages];
+};
+
 // Execute web search using Perplexity or Kagi
 interface WebSearchResult {
   content: string;
@@ -555,27 +576,28 @@ export const executeApiCall = async (
   const apiKey = keySelection.key;
   const baseUrl = config.customBaseUrls[provider] || getDefaultBaseUrl(provider);
   const model = config.selectedModel[provider];
+  const messagesWithSystem = injectSystemPrompt(messages, config);
 
   try {
     let result: ApiResponse;
     switch (provider) {
       case 'google':
-        result = await callGoogle(apiKey, baseUrl, model, messages);
+        result = await callGoogle(apiKey, baseUrl, model, messagesWithSystem);
         break;
       case 'openai':
-        result = await callOpenAI(apiKey, baseUrl, model, messages);
+        result = await callOpenAI(apiKey, baseUrl, model, messagesWithSystem);
         break;
       case 'anthropic':
-        result = await callAnthropic(apiKey, baseUrl, model, messages);
+        result = await callAnthropic(apiKey, baseUrl, model, messagesWithSystem);
         break;
       case 'openrouter':
-        result = await callOpenRouter(apiKey, baseUrl, model, messages);
+        result = await callOpenRouter(apiKey, baseUrl, model, messagesWithSystem);
         break;
       case 'perplexity':
-        result = await callPerplexity(apiKey, baseUrl, model, messages);
+        result = await callPerplexity(apiKey, baseUrl, model, messagesWithSystem);
         break;
       default:
-        result = await callOpenAI(apiKey, baseUrl, model, messages);
+        result = await callOpenAI(apiKey, baseUrl, model, messagesWithSystem);
     }
 
     // Check if response indicates quota exhaustion
@@ -619,25 +641,26 @@ export const executeApiStream = async (
   const apiKey = keySelection.key;
   const baseUrl = config.customBaseUrls[provider] || getDefaultBaseUrl(provider);
   const model = config.selectedModel[provider];
+  const messagesWithSystem = injectSystemPrompt(messages, config);
 
   try {
     let result: ApiResponse;
     switch (provider) {
       case 'google':
-        result = await streamGoogle(apiKey, baseUrl, model, messages, onChunk, signal, config, onWebSearch, onReasoning, onImage);
+        result = await streamGoogle(apiKey, baseUrl, model, messagesWithSystem, onChunk, signal, config, onWebSearch, onReasoning, onImage);
         break;
       case 'openai':
       case 'openrouter':
-        result = await streamOpenAI(apiKey, baseUrl, model, messages, onChunk, provider === 'openrouter', signal, config, onWebSearch, onReasoning, onImage);
+        result = await streamOpenAI(apiKey, baseUrl, model, messagesWithSystem, onChunk, provider === 'openrouter', signal, config, onWebSearch, onReasoning, onImage);
         break;
       case 'anthropic':
-        result = await streamAnthropic(apiKey, baseUrl, model, messages, onChunk, signal, config, onReasoning);
+        result = await streamAnthropic(apiKey, baseUrl, model, messagesWithSystem, onChunk, signal, config, onReasoning);
         break;
       case 'perplexity':
-        result = await streamPerplexity(apiKey, baseUrl, model, messages, onChunk, signal, onReasoning);
+        result = await streamPerplexity(apiKey, baseUrl, model, messagesWithSystem, onChunk, signal, onReasoning);
         break;
       default:
-        result = await streamOpenAI(apiKey, baseUrl, model, messages, onChunk, false, signal, config, onWebSearch, onReasoning, onImage);
+        result = await streamOpenAI(apiKey, baseUrl, model, messagesWithSystem, onChunk, false, signal, config, onWebSearch, onReasoning, onImage);
     }
 
     // Check if response indicates quota exhaustion
@@ -1125,20 +1148,6 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
     headers['X-Title'] = 'AI Ask Extension';
   }
 
-  // Build request body
-  // Add current date/time context for time-sensitive queries
-  const now = new Date();
-
-  const currentDateTime = now.toLocaleString('en-US', {
-    weekday: 'long',
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZoneName: 'short'
-  });
-
   // Detect web search configuration early to conditionally add instructions
   const webSearchEnabled = config && shouldEnableWebSearch(config, model);
   const isGeminiModel = /^gemini-/.test(model);
@@ -1152,19 +1161,18 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
 
   // Only add web search instructions for OpenAI-format function tool, not for native search
   const webSearchInstruction = (!useNativeGoogleSearch && !useNativeOpenAISearch && webSearchEnabled)
-    ? ' The web search tool retrieves real-time information. When searching for current status (e.g. "price now", "latest news"), do NOT unnecessarily append the current month/year to the query, as this may limit results. Trust the search tool to provide the latest data. Only specify dates if searching for historical information or specific future projections. If you decide to use the web search tool, you should briefly explain what you are going to search for before calling the tool. You can call web_search multiple times in parallel if you need to search for different things simultaneously, or pass a "queries" array to search for multiple things in a single call.'
+    ? 'The web search tool retrieves real-time information. When searching for current status (e.g. "price now", "latest news"), do NOT unnecessarily append the current month/year to the query, as this may limit results. Trust the search tool to provide the latest data. Only specify dates if searching for historical information or specific future projections. If you decide to use the web search tool, you should briefly explain what you are going to search for before calling the tool. You can call web_search multiple times in parallel if you need to search for different things simultaneously, or pass a "queries" array to search for multiple things in a single call.'
     : '';
 
-  const dateContext = `IMPORTANT: Today's date is ${currentDateTime}.${webSearchInstruction}`;
-
-  // Prepend system message with current time if not already present
-  const msgsWithTime = msgs[0]?.role === 'system'
-    ? [{ ...msgs[0], content: `${dateContext}\n\n${msgs[0].content}` }, ...msgs.slice(1)]
-    : [{ role: 'system', content: `${dateContext}\n\nYou are a helpful assistant.` }, ...msgs];
+  // Append web search instruction to existing system message if needed
+  const defaultSystemPrompt = getSystemPrompt(config || {} as AppConfig);
+  const msgsWithSystem = msgs[0]?.role === 'system'
+    ? [{ ...msgs[0], content: `${msgs[0].content}${webSearchInstruction ? '\n\n' + webSearchInstruction : ''}` }, ...msgs.slice(1)]
+    : [{ role: 'system', content: `${defaultSystemPrompt}${webSearchInstruction ? '\n\n' + webSearchInstruction : ''}` }, ...msgs];
 
   const requestBody: any = {
     model: model,
-    messages: msgsWithTime,
+    messages: msgsWithSystem,
     stream: true
   };
 
@@ -1354,7 +1362,7 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
   // Skip for native OpenAI search since it handles web search internally via web_search_options
   if (toolCalls.length > 0 && config && webSearchEnabled && !useNativeOpenAISearch) {
     let currentToolCalls = toolCalls;
-    let currentMessages = msgsWithTime;
+    let currentMessages = msgsWithSystem;
     let currentFullText = fullText;
     const MAX_TOOL_ITERATIONS = 5; // Prevent infinite loops
     let iteration = 0;

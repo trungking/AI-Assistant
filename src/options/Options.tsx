@@ -1195,6 +1195,31 @@ export default function Options() {
 
                 {activeTab === 'prompts' && (
                     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                        {/* System Prompt Card */}
+                        <div className="bg-white dark:bg-gpt-sidebar rounded-2xl shadow-sm border border-slate-200 dark:border-gpt-hover p-6">
+                            <h3 className="text-base font-bold text-slate-900 dark:text-gpt-text mb-2 flex items-center gap-2">
+                                <div className="w-1 h-5 bg-purple-600 rounded-full"></div>
+                                System Prompt
+                            </h3>
+                            <p className="text-xs text-slate-500 dark:text-gpt-secondary mb-4">
+                                This prompt defines the AI's behavior and personality. It is sent at the start of every conversation.
+                            </p>
+                            <textarea
+                                value={config.systemPrompt || ''}
+                                onChange={(e) => saveConfig({ ...config, systemPrompt: e.target.value })}
+                                className="w-full text-sm text-slate-700 dark:text-gray-300 bg-slate-50 dark:bg-[#1a1b1e] border border-slate-200 dark:border-gpt-hover rounded-lg p-3 focus:ring-1 focus:ring-blue-500/50 dark:focus:ring-blue-500/30 transition-all font-mono min-h-[120px] resize-y placeholder:text-slate-400 dark:placeholder:text-gray-600 leading-relaxed"
+                                placeholder="Enter system prompt..."
+                            />
+                            <div className="flex justify-end mt-2">
+                                <button
+                                    onClick={() => saveConfig({ ...config, systemPrompt: DEFAULT_CONFIG.systemPrompt })}
+                                    className="text-xs text-slate-400 hover:text-slate-600 dark:hover:text-gpt-secondary px-2 py-1 rounded transition-colors flex items-center gap-1"
+                                >
+                                    <RotateCcw size={12} /> Reset to Default
+                                </button>
+                            </div>
+                        </div>
+
                         <div className="flex justify-between items-end">
                             <div>
                                 <h2 className="text-lg font-bold text-slate-900 dark:text-gpt-text">Prompt Templates</h2>
