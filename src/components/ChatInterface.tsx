@@ -4,12 +4,25 @@ import { type AppConfig, type ChatMessage, type PromptTemplate, type Provider } 
 import { callApi, fetchModels } from '../lib/api';
 import { Send, Settings, Sparkles, Loader2, User, Bot, Trash2, Zap, Image as ImageIcon, ChevronDown, ChevronRight, Check, X, Copy, PauseCircle, SquarePen, Clock, Globe, Link2, ExternalLink, Square, RefreshCw, Download } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import type { PluggableList } from 'unified';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import remarkBreaks from 'remark-breaks';
 import { clsx } from 'clsx';
 import { setStorage } from '../lib/storage';
+
+const markdownRemarkPlugins: PluggableList = [
+    remarkGfm,
+    remarkBreaks,
+    remarkMath
+];
+
+const markdownRehypePlugins: PluggableList = [rehypeKatex];
+
+const escapeCurrencyDollars = (content: string) => (
+    content.replace(/(^|[^\\])\$(?=\s?\d)/g, '$1\\$')
+);
 
 const ProviderDisplayNames: Record<string, string> = {
     openai: 'OpenAI',
@@ -1707,8 +1720,8 @@ export default function ChatInterface({
                                             {(expandedReasoning[idx] ?? config.alwaysExpandReasoning ?? false) && (
                                                 <div className="mt-1 pl-3 border-l-2 border-slate-200 dark:border-slate-700 ml-1.5">
                                                     <div className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed max-h-[30vh] overflow-y-auto custom-scrollbar">
-                                                        <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]} rehypePlugins={[rehypeKatex]}>
-                                                            {msg.reasoning.replace(/(\*\*[^\*]+\*\*)\n(?!\n)/g, '$1\n\n')}
+                                                        <ReactMarkdown remarkPlugins={markdownRemarkPlugins} rehypePlugins={markdownRehypePlugins}>
+                                                            {escapeCurrencyDollars(msg.reasoning.replace(/(\*\*[^\*]+\*\*)\n(?!\n)/g, '$1\n\n'))}
                                                         </ReactMarkdown>
                                                     </div>
                                                 </div>
@@ -1748,8 +1761,8 @@ export default function ChatInterface({
                                         </div>
                                     ) : (
                                         <ReactMarkdown
-                                            remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
-                                            rehypePlugins={[rehypeKatex]}
+                                            remarkPlugins={markdownRemarkPlugins}
+                                            rehypePlugins={markdownRehypePlugins}
                                             components={{
                                                 a: ({ node, ...props }: any) => {
                                                     const href = props.href || '';
@@ -1782,7 +1795,7 @@ export default function ChatInterface({
                                             } as any}
                                         >
                                             {/* Preprocess content to convert [^N] to [N](#source-N) */}
-                                            {msg.content.replace(/\[\^(\d+)\]/g, '[$1](#source-$1)')}
+                                            {escapeCurrencyDollars(msg.content.replace(/\[\^(\d+)\]/g, '[$1](#source-$1)'))}
                                         </ReactMarkdown>
                                     )}
                                     {/* Web Search Sections - Grouped Card */}
@@ -1869,8 +1882,8 @@ export default function ChatInterface({
                                                                         <div className="mx-3 mb-2 px-3 py-2 bg-slate-50 dark:bg-gpt-sidebar rounded-md border border-slate-100 dark:border-gpt-hover max-h-60 overflow-y-auto custom-scrollbar shadow-sm">
                                                                             <div className="text-xs text-slate-700 dark:text-gpt-text leading-relaxed">
                                                                                 <ReactMarkdown
-                                                                                    remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
-                                                                                    rehypePlugins={[rehypeKatex]}
+                                                                                    remarkPlugins={markdownRemarkPlugins}
+                                                                                    rehypePlugins={markdownRehypePlugins}
                                                                                     components={{
                                                                                         a: ({ node, ...props }: any) => {
                                                                                             const href = props.href || '';
@@ -1898,7 +1911,7 @@ export default function ChatInterface({
                                                                                         }
                                                                                     } as any}
                                                                                 >
-                                                                                    {search.result.replace(/\[\^(\d+)\]/g, '[$1](#source-$1)')}
+                                                                                    {escapeCurrencyDollars(search.result.replace(/\[\^(\d+)\]/g, '[$1](#source-$1)'))}
                                                                                 </ReactMarkdown>
                                                                             </div>
                                                                         </div>
