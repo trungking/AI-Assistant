@@ -936,7 +936,8 @@ export default function ChatInterface({
         const textToSubmit = overrideInstruction !== undefined ? overrideInstruction : instruction;
         let activeConfig = overrideConfig || config;
 
-        if (!textToSubmit.trim()) return;
+        const hasContext = !!(selectedText || selectedImage);
+        if (!textToSubmit.trim() && !hasContext) return;
 
         setLoading(true);
         setError('');
@@ -2173,7 +2174,7 @@ export default function ChatInterface({
                         ) : (
                             <button
                                 onClick={() => handleSubmit()}
-                                disabled={!instruction.trim()}
+                                disabled={!instruction.trim() && !selectedText && !selectedImage}
                                 className="w-8 h-8 bg-blue-600 hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-700 text-white rounded-lg shadow-md hover:shadow-lg disabled:opacity-50 disabled:bg-slate-300 dark:disabled:bg-slate-700 disabled:text-slate-500 dark:disabled:text-slate-400 disabled:cursor-not-allowed disabled:shadow-none transition-all duration-200 flex items-center justify-center"
                             >
                                 <Send size={14} />
