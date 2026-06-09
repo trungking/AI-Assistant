@@ -3,6 +3,7 @@ import type { AppConfig, ChatMessage } from './types';
 interface ApiResponse {
   text: string;
   error?: string;
+  images?: string[];
 }
 
 /**
@@ -110,6 +111,70 @@ const injectSystemPrompt = (messages: ChatMessage[], config: AppConfig): ChatMes
     return messages;
   }
   return [{ role: 'system', content: getSystemPrompt(config) }, ...messages];
+};
+
+const shouldUseImageGenerationsEndpoint = (model: string): boolean => {
+  const normalizedModel = model.toLowerCase();
+  return normalizedModel.includes('image') && !normalizedModel.includes('gemini');
+};
+
+const buildImageGenerationPrompt = (messages: ChatMessage[]): string => {
+  const lastUserMessage = [...messages].reverse().find(m => m.role === 'user' && m.content.trim());
+  return lastUserMessage?.content.trim() || '';
+};
+
+const extractGeneratedImages = (data: any): string[] => {
+  if (!Array.isArray(data?.data)) return [];
+
+  return data.data
+    .map((item: any) => {
+      if (item?.url) return item.url;
+      if (item?.b64_json) return `data:image/png;base64,${item.b64_json}`;
+      return null;
+    })
+    .filter((url: string | null): url is string => Boolean(url));
+};
+
+const callOpenAIImageGeneration = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], signal?: AbortSignal, extraHeaders: Record<string, string> = {}): Promise<ApiResponse> => {
+  const prompt = buildImageGenerationPrompt(messages);
+  if (!prompt) {
+    throw new Error('Image generation prompt is empty.');
+  }
+
+  const url = `${baseUrl.replace(/\/+$/, '')}/images/generations`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+      ...extraHeaders
+    },
+    body: JSON.stringify({
+      model,
+      prompt,
+      n: 1
+    }),
+    signal
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    try {
+      const jsonErr = JSON.parse(err);
+      throw new Error(jsonErr.error?.message || response.statusText);
+    } catch {
+      throw new Error(err || response.statusText);
+    }
+  }
+
+  const data = await response.json();
+  const images = extractGeneratedImages(data);
+  const text = data.data
+    ?.map((item: any) => item?.revised_prompt)
+    .filter(Boolean)
+    .join('\n\n') || '';
+
+  return { text, images };
 };
 
 // Execute web search using Perplexity or Kagi
@@ -908,6 +973,10 @@ const callGoogle = async (apiKey: string, baseUrl: string, model: string, messag
 };
 
 const callOpenAI = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[]): Promise<ApiResponse> => {
+  if (shouldUseImageGenerationsEndpoint(model)) {
+    return callOpenAIImageGeneration(apiKey, baseUrl, model, messages);
+  }
+
   const url = `${baseUrl}/chat/completions`;
 
   const msgs = messages.map(m => {
@@ -996,6 +1065,13 @@ const callAnthropic = async (apiKey: string, baseUrl: string, model: string, mes
 };
 
 const callOpenRouter = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[]): Promise<ApiResponse> => {
+  if (shouldUseImageGenerationsEndpoint(model)) {
+    return callOpenAIImageGeneration(apiKey, baseUrl, model, messages, undefined, {
+      'HTTP-Referer': 'https://github.com/your/repo',
+      'X-Title': 'AI Ask Extension',
+    });
+  }
+
   // OpenRouter is OpenAI compatible
   const url = `${baseUrl}/chat/completions`;
 
@@ -1154,6 +1230,24 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
   if (isOpenRouter) {
     headers['HTTP-Referer'] = 'https://github.com/your/repo';
     headers['X-Title'] = 'AI Ask Extension';
+  }
+
+  if (shouldUseImageGenerationsEndpoint(model)) {
+    const extraHeaders: Record<string, string> = {};
+    if (isOpenRouter) {
+      extraHeaders['HTTP-Referer'] = headers['HTTP-Referer'];
+      extraHeaders['X-Title'] = headers['X-Title'];
+    }
+    const result = await callOpenAIImageGeneration(apiKey, baseUrl, model, messages, signal, extraHeaders);
+    if (result.text) {
+      onChunk(result.text);
+    }
+    if (result.images && onImage) {
+      for (const imageUrl of result.images) {
+        onImage(imageUrl);
+      }
+    }
+    return result;
   }
 
   // Detect web search configuration early to conditionally add instructions
