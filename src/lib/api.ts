@@ -6,6 +6,141 @@ interface ApiResponse {
   images?: string[];
 }
 
+type ThinkingTag = {
+  open: string;
+  close: string;
+};
+
+const THINKING_TAGS: ThinkingTag[] = [
+  { open: '<thinking>', close: '</thinking>' },
+  { open: '<think>', close: '</think>' }
+];
+
+const findFirstToken = (text: string, tokens: string[]): { index: number; token: string } | null => {
+  const lowerText = text.toLowerCase();
+  let first: { index: number; token: string } | null = null;
+
+  for (const token of tokens) {
+    const index = lowerText.indexOf(token);
+    if (index >= 0 && (!first || index < first.index)) {
+      first = { index, token };
+    }
+  }
+
+  return first;
+};
+
+const getPartialTokenSuffixLength = (text: string, tokens: string[]): number => {
+  const lowerText = text.toLowerCase();
+  let length = 0;
+
+  for (const token of tokens) {
+    const maxLength = Math.min(lowerText.length, token.length - 1);
+    for (let i = 1; i <= maxLength; i++) {
+      if (lowerText.endsWith(token.slice(0, i))) {
+        length = Math.max(length, i);
+      }
+    }
+  }
+
+  return length;
+};
+
+export const splitThinkingTags = (text: string): { content: string; reasoning: string } => {
+  let content = '';
+  let reasoning = '';
+  const parser = createThinkingTagExtractor(
+    (chunk) => { content += chunk; },
+    (chunk) => { reasoning += chunk; }
+  );
+
+  parser.write(text);
+  parser.flush();
+
+  return { content, reasoning };
+};
+
+const stripThinkingTags = (text: string): string => splitThinkingTags(text).content;
+
+const createThinkingTagExtractor = (
+  onContent: (text: string) => void,
+  onReasoning?: (text: string) => void
+) => {
+  const openTags = THINKING_TAGS.map(tag => tag.open);
+  let buffer = '';
+  let activeTag: ThinkingTag | null = null;
+
+  const emitContent = (text: string) => {
+    if (text) onContent(text);
+  };
+
+  const emitReasoning = (text: string) => {
+    if (text && onReasoning) onReasoning(text);
+  };
+
+  const processBuffer = (isFinal = false) => {
+    while (buffer) {
+      if (!activeTag) {
+        const nextOpen = findFirstToken(buffer, openTags);
+        if (!nextOpen) {
+          const keepLength = isFinal ? 0 : getPartialTokenSuffixLength(buffer, openTags);
+          const emitLength = buffer.length - keepLength;
+          if (emitLength > 0) {
+            emitContent(buffer.slice(0, emitLength));
+            buffer = buffer.slice(emitLength);
+            continue;
+          }
+          break;
+        }
+
+        const tag = THINKING_TAGS.find(candidate => candidate.open === nextOpen.token);
+        if (!tag) break;
+
+        emitContent(buffer.slice(0, nextOpen.index));
+        buffer = buffer.slice(nextOpen.index + nextOpen.token.length);
+        activeTag = tag;
+        continue;
+      }
+
+      const closeTags = [activeTag.close];
+      const nextClose = findFirstToken(buffer, closeTags);
+      if (!nextClose) {
+        const keepLength = isFinal ? 0 : getPartialTokenSuffixLength(buffer, closeTags);
+        const emitLength = buffer.length - keepLength;
+        if (emitLength > 0) {
+          emitReasoning(buffer.slice(0, emitLength));
+          buffer = buffer.slice(emitLength);
+          continue;
+        }
+        break;
+      }
+
+      emitReasoning(buffer.slice(0, nextClose.index));
+      buffer = buffer.slice(nextClose.index + nextClose.token.length);
+      activeTag = null;
+    }
+  };
+
+  return {
+    write(text: string) {
+      if (!text) return;
+      buffer += text;
+      processBuffer();
+    },
+    flush() {
+      processBuffer(true);
+      if (buffer) {
+        if (activeTag) {
+          emitReasoning(buffer);
+        } else {
+          emitContent(buffer);
+        }
+        buffer = '';
+      }
+    }
+  };
+};
+
 /**
  * Parse image URL for Gemini API format.
  * Expects a data URL (base64). External URLs should be converted to data URLs
@@ -969,7 +1104,7 @@ const callGoogle = async (apiKey: string, baseUrl: string, model: string, messag
   // Extract text from all parts
   const parts = data.candidates?.[0]?.content?.parts;
   const text = parts?.filter((p: any) => p.text).map((p: any) => p.text).join('') || '';
-  return { text };
+  return { text: stripThinkingTags(text) };
 };
 
 const callOpenAI = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[]): Promise<ApiResponse> => {
@@ -1010,7 +1145,7 @@ const callOpenAI = async (apiKey: string, baseUrl: string, model: string, messag
   }
 
   const data = await response.json();
-  return { text: data.choices?.[0]?.message?.content || data.choices?.[0]?.text || '' };
+  return { text: stripThinkingTags(data.choices?.[0]?.message?.content || data.choices?.[0]?.text || '') };
 };
 
 const callAnthropic = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[]): Promise<ApiResponse> => {
@@ -1061,7 +1196,7 @@ const callAnthropic = async (apiKey: string, baseUrl: string, model: string, mes
   }
 
   const data = await response.json();
-  return { text: data.content?.[0]?.text || '' };
+  return { text: stripThinkingTags(data.content?.[0]?.text || '') };
 };
 
 const callOpenRouter = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[]): Promise<ApiResponse> => {
@@ -1112,7 +1247,7 @@ const callOpenRouter = async (apiKey: string, baseUrl: string, model: string, me
   }
 
   const data = await response.json();
-  return { text: data.choices?.[0]?.message?.content || '' };
+  return { text: stripThinkingTags(data.choices?.[0]?.message?.content || '') };
 }
 
 // Perplexity API (OpenAI compatible with web search capabilities)
@@ -1156,7 +1291,7 @@ const callPerplexity = async (apiKey: string, baseUrl: string, model: string, me
   }
 
   const data = await response.json();
-  return { text: data.choices?.[0]?.message?.content || '' };
+  return { text: stripThinkingTags(data.choices?.[0]?.message?.content || '') };
 }
 
 // Streaming Implementations
@@ -1321,13 +1456,20 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
   let toolCalls: any[] = [];
   let groundingSources: Array<{ title: string; url: string; snippet?: string }> = [];
   let nativeSearchAnnotations: Array<any> = [];
+  const taggedContent = createThinkingTagExtractor((text) => {
+    fullText += text;
+    onChunk(text);
+  }, onReasoning);
 
   const contentType = response.headers.get('content-type') || '';
   if (contentType.includes('application/json')) {
     const data = await response.json();
     const choice = data.choices?.[0];
-    fullText = choice?.message?.content || choice?.text || '';
-    if (fullText) onChunk(fullText);
+    const content = choice?.message?.content || choice?.text || '';
+    if (content) {
+      taggedContent.write(content);
+      taggedContent.flush();
+    }
 
     if (choice?.message?.tool_calls) {
       toolCalls = choice.message.tool_calls;
@@ -1355,8 +1497,7 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
     }
   } else {
     await readStream(response, (text) => {
-      fullText += text;
-      onChunk(text);
+      taggedContent.write(text);
     }, (line) => {
       const trim = line.trim();
       if (!trim || !trim.startsWith('data: ')) return null;
@@ -1431,6 +1572,7 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
         return null;
       }
     });
+    taggedContent.flush();
   }
 
   // If we have grounding sources from native Google search, notify the UI
@@ -1613,6 +1755,11 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
           // Reset for next iteration
           let followUpText = '';
           let followUpToolCalls: any[] = [];
+          const followUpTaggedContent = createThinkingTagExtractor((text) => {
+            followUpText += text;
+            fullText += text;
+            onChunk(text);
+          }, onReasoning);
 
           const followUpContentType = followUpResponse.headers.get('content-type') || '';
           if (followUpContentType.includes('application/json')) {
@@ -1620,9 +1767,8 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
             const choice = data.choices?.[0];
             const content = choice?.message?.content || choice?.text || '';
             if (content) {
-              followUpText = content;
-              fullText += content;
-              onChunk(content);
+              followUpTaggedContent.write(content);
+              followUpTaggedContent.flush();
             }
             // Check for more tool calls
             if (choice?.message?.tool_calls) {
@@ -1630,9 +1776,7 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
             }
           } else {
             await readStream(followUpResponse, (text) => {
-              followUpText += text;
-              fullText += text;
-              onChunk(text);
+              followUpTaggedContent.write(text);
             }, (line) => {
               const trim = line.trim();
               if (!trim || !trim.startsWith('data: ')) return null;
@@ -1661,6 +1805,7 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
                 return null;
               }
             });
+            followUpTaggedContent.flush();
           }
 
           // Update state for next iteration
@@ -1696,7 +1841,7 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
   return { text: fullText };
 };
 
-const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, signal?: AbortSignal, _config?: AppConfig, _onReasoning?: (text: string) => void): Promise<ApiResponse> => {
+const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, signal?: AbortSignal, _config?: AppConfig, onReasoning?: (text: string) => void): Promise<ApiResponse> => {
   const url = `${baseUrl}/messages`;
 
   // Sanitize messages to remove UI-only fields and filter empty messages
@@ -1746,16 +1891,22 @@ const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, m
   }
 
   let fullText = '';
+  const taggedContent = createThinkingTagExtractor((text) => {
+    fullText += text;
+    onChunk(text);
+  }, onReasoning);
   const contentType = response.headers.get('content-type') || '';
 
   if (contentType.includes('application/json')) {
     const data = await response.json();
-    fullText = data.content?.[0]?.text || '';
-    if (fullText) onChunk(fullText);
+    const content = data.content?.[0]?.text || '';
+    if (content) {
+      taggedContent.write(content);
+      taggedContent.flush();
+    }
   } else {
     await readStream(response, (text) => {
-      fullText += text;
-      onChunk(text);
+      taggedContent.write(text);
     }, (line) => {
       const trim = line.trim();
       if (!trim || !trim.startsWith('data: ')) return null;
@@ -1771,13 +1922,14 @@ const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, m
         return null;
       }
     });
+    taggedContent.flush();
   }
 
   return { text: fullText };
 };
 
 // Streaming for Perplexity (OpenAI compatible SSE format)
-const streamPerplexity = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, signal?: AbortSignal, _onReasoning?: (text: string) => void): Promise<ApiResponse> => {
+const streamPerplexity = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, signal?: AbortSignal, onReasoning?: (text: string) => void): Promise<ApiResponse> => {
   const url = `${baseUrl}/chat/completions`;
 
   // Sanitize messages to remove UI-only fields and filter empty messages
@@ -1824,16 +1976,22 @@ const streamPerplexity = async (apiKey: string, baseUrl: string, model: string, 
   }
 
   let fullText = '';
+  const taggedContent = createThinkingTagExtractor((text) => {
+    fullText += text;
+    onChunk(text);
+  }, onReasoning);
   const contentType = response.headers.get('content-type') || '';
 
   if (contentType.includes('application/json')) {
     const data = await response.json();
-    fullText = data.choices?.[0]?.message?.content || '';
-    if (fullText) onChunk(fullText);
+    const content = data.choices?.[0]?.message?.content || '';
+    if (content) {
+      taggedContent.write(content);
+      taggedContent.flush();
+    }
   } else {
     await readStream(response, (text) => {
-      fullText += text;
-      onChunk(text);
+      taggedContent.write(text);
     }, (line) => {
       const trim = line.trim();
       if (!trim || !trim.startsWith('data: ')) return null;
@@ -1849,12 +2007,13 @@ const streamPerplexity = async (apiKey: string, baseUrl: string, model: string, 
         return null;
       }
     });
+    taggedContent.flush();
   }
 
   return { text: fullText };
 };
 
-const streamGoogle = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, signal?: AbortSignal, config?: AppConfig, onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void, _onReasoning?: (text: string) => void, onImage?: (imageUrl: string) => void): Promise<ApiResponse> => {
+const streamGoogle = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], onChunk: (text: string) => void, signal?: AbortSignal, config?: AppConfig, onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void, onReasoning?: (text: string) => void, onImage?: (imageUrl: string) => void): Promise<ApiResponse> => {
   // API: POST https://.../streamGenerateContent?key=...&alt=sse
   // Using alt=sse for Server-Sent Events format which is more reliable than JSON array streaming
   const url = `${baseUrl}/models/${model}:streamGenerateContent?key=${apiKey}&alt=sse`;
@@ -1924,6 +2083,10 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
 
   let fullText = '';
   let groundingSources: Array<{ title: string; url: string; snippet?: string }> = [];
+  const taggedContent = createThinkingTagExtractor((text) => {
+    fullText += text;
+    onChunk(text);
+  }, onReasoning);
 
   const contentType = response.headers.get('content-type') || '';
 
@@ -1934,8 +2097,7 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
     if (parts && Array.isArray(parts)) {
       for (const part of parts) {
         if (part.text) {
-          fullText += part.text;
-          onChunk(part.text);
+          taggedContent.write(part.text);
         }
         // Extract images from inline data
         if (onImage && part.inlineData && part.inlineData.mimeType && part.inlineData.data) {
@@ -1982,6 +2144,7 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
       }
       return null; // We handle onChunk inside processGeminiResponse directly
     });
+    taggedContent.flush();
   } else if (contentType.includes('application/json')) {
     // JSON response - could be a single object or an array of objects
     const data = await response.json();
@@ -1995,6 +2158,7 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
       // Single response object
       processGeminiResponse(data);
     }
+    taggedContent.flush();
   } else {
     // Fallback: try to parse as JSON array stream using brace-matching
     const reader = response.body?.getReader();
@@ -2053,6 +2217,7 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
         buffer = buffer.substring(consumedUpTo);
       }
     }
+    taggedContent.flush();
   }
 
   // Notify about grounding sources at the end of streaming
