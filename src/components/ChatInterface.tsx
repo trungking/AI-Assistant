@@ -20,9 +20,123 @@ const markdownRemarkPlugins: PluggableList = [
 
 const markdownRehypePlugins: PluggableList = [rehypeKatex];
 
-const escapeCurrencyDollars = (content: string) => (
-    content.replace(/(^|[^\\])\$(?=\s?\d)/g, '$1\\$')
-);
+const isEscapedDollar = (content: string, index: number) => {
+    let backslashCount = 0;
+
+    for (let i = index - 1; i >= 0 && content[i] === '\\'; i--) {
+        backslashCount++;
+    }
+
+    return backslashCount % 2 === 1;
+};
+
+const countDollarRun = (content: string, index: number) => {
+    let runLength = 0;
+
+    while (content[index + runLength] === '$') {
+        runLength++;
+    }
+
+    return runLength;
+};
+
+const findClosingDollarRun = (content: string, startIndex: number, runLength: number) => {
+    for (let i = startIndex; i < content.length; i++) {
+        if (runLength === 1 && (content[i] === '\n' || content[i] === '\r')) {
+            return -1;
+        }
+
+        if (content[i] !== '$' || isEscapedDollar(content, i)) {
+            continue;
+        }
+
+        const closeRunLength = countDollarRun(content, i);
+
+        if (closeRunLength === runLength) {
+            return i;
+        }
+
+        i += closeRunLength - 1;
+    }
+
+    return -1;
+};
+
+const isLikelyInlineMath = (value: string) => {
+    const trimmed = value.trim();
+
+    if (!trimmed || trimmed !== value || /[\r\n]/.test(value)) {
+        return false;
+    }
+
+    if (/^[=+\-*/^_<>,|~]/.test(trimmed) || /[=+\-*/^_<>,|~]$/.test(trimmed)) {
+        return false;
+    }
+
+    if (/\\[a-zA-Z]+/.test(trimmed)) {
+        return true;
+    }
+
+    if (!/[0-9a-zA-Z]/.test(trimmed)) {
+        return false;
+    }
+
+    const mathCharactersOnly = /^[0-9a-zA-Z\s{}()[\].,=+\-*/^_<>,|:;!]+$/.test(trimmed);
+
+    if (!mathCharactersOnly) {
+        return false;
+    }
+
+    if (!/\s/.test(trimmed)) {
+        return true;
+    }
+
+    if (!/[=+\-*/^_<>|~]/.test(trimmed)) {
+        return false;
+    }
+
+    return !/\b(and|or|the|is|are|was|were|be|to|for|from|with|without|because|itself|today|tomorrow|tax|price|cost|costs|dollar|dollars)\b/i.test(trimmed);
+};
+
+// Keep likely $...$ math intact, but escape lone dollars before remark-math can pair currency amounts with later text.
+const escapeCurrencyDollars = (content: string) => {
+    let result = '';
+
+    for (let i = 0; i < content.length; i++) {
+        if (content[i] !== '$' || isEscapedDollar(content, i)) {
+            result += content[i];
+            continue;
+        }
+
+        const runLength = countDollarRun(content, i);
+
+        if (runLength > 1) {
+            const closingIndex = findClosingDollarRun(content, i + runLength, runLength);
+
+            if (closingIndex !== -1) {
+                result += content.slice(i, closingIndex + runLength);
+                i = closingIndex + runLength - 1;
+            } else {
+                result += content.slice(i, i + runLength);
+                i += runLength - 1;
+            }
+
+            continue;
+        }
+
+        const closingIndex = findClosingDollarRun(content, i + 1, runLength);
+
+        if (closingIndex !== -1 && isLikelyInlineMath(content.slice(i + 1, closingIndex))) {
+            result += content.slice(i, closingIndex + runLength);
+            i = closingIndex + runLength - 1;
+            continue;
+        }
+
+        result += '\\$';
+    }
+
+    return result;
+};
 
 const ProviderDisplayNames: Record<string, string> = {
     openai: 'OpenAI',
