@@ -138,6 +138,41 @@ const escapeCurrencyDollars = (content: string) => {
     return result;
 };
 
+// Extracts the raw text from a react-markdown <pre><code> node tree so the
+// clipboard gets the unformatted source (no trailing newline added by the DOM).
+const extractTextFromNode = (node: any): string => {
+    if (node == null) return '';
+    if (typeof node === 'string') return node;
+    if (Array.isArray(node)) return node.map(extractTextFromNode).join('');
+    if (typeof node === 'object' && 'props' in node) {
+        return extractTextFromNode((node as any).props?.children);
+    }
+    return '';
+};
+
+// Renders a fenced code block with a hover copy button. Inline code is left untouched.
+const CodeBlock = ({ node, children, ...props }: any) => {
+    const [copied, setCopied] = useState(false);
+    const raw = extractTextFromNode(node) || extractTextFromNode(children) || '';
+
+    return (
+        <div className="relative group/code my-4">
+            <button
+                onClick={() => {
+                    navigator.clipboard.writeText(raw.replace(/\n$/, ''));
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 2000);
+                }}
+                className="absolute right-2 top-2 p-1 rounded-md bg-white/80 dark:bg-gpt-hover/80 text-slate-500 dark:text-slate-300 hover:text-slate-800 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-600 opacity-0 group-hover/code:opacity-100 focus:opacity-100 transition-all duration-200"
+                title={copied ? 'Copied' : 'Copy code'}
+            >
+                {copied ? <Check size={12} className="text-green-500" /> : <Copy size={12} />}
+            </button>
+            <pre {...props}>{children}</pre>
+        </div>
+    );
+};
+
 const ProviderDisplayNames: Record<string, string> = {
     openai: 'OpenAI',
     google: 'Google Gemini',
@@ -1879,6 +1914,7 @@ export default function ChatInterface({
                                             remarkPlugins={markdownRemarkPlugins}
                                             rehypePlugins={markdownRehypePlugins}
                                             components={{
+                                                pre: CodeBlock,
                                                 a: ({ node, ...props }: any) => {
                                                     const href = props.href || '';
                                                     if (href.startsWith('#source-')) {
@@ -2000,6 +2036,7 @@ export default function ChatInterface({
                                                                                     remarkPlugins={markdownRemarkPlugins}
                                                                                     rehypePlugins={markdownRehypePlugins}
                                                                                     components={{
+                                                                                        pre: CodeBlock,
                                                                                         a: ({ node, ...props }: any) => {
                                                                                             const href = props.href || '';
                                                                                             if (href.startsWith('#source-')) {
