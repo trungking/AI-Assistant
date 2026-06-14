@@ -52,6 +52,13 @@ export const openContentPopup = (
     if (isContentPopupMounted() && !hasNewContext) {
         if (shadowContainer) {
             shadowContainer.style.display = '';
+            // The component is already mounted, so its mount-time auto-focus
+            // effect won't re-run. Focus the textarea directly so the user can
+            // start typing immediately when the popup reappears.
+            const textarea = shadowContainer.shadowRoot?.querySelector('textarea');
+            if (textarea) {
+                setTimeout(() => (textarea as HTMLTextAreaElement).focus(), 50);
+            }
         }
         return;
     }
