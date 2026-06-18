@@ -11,6 +11,7 @@ import rehypeKatex from 'rehype-katex';
 import remarkBreaks from 'remark-breaks';
 import { clsx } from 'clsx';
 import { setStorage } from '../lib/storage';
+import { CHROME_NANO_MODEL, CHROME_PROVIDER, destroyChromeNanoSession, getChromeNanoAvailability } from '../lib/chromeNano';
 
 const markdownRemarkPlugins: PluggableList = [
     remarkGfm,
@@ -174,6 +175,7 @@ const CodeBlock = ({ node, children, ...props }: any) => {
 };
 
 const ProviderDisplayNames: Record<string, string> = {
+    chrome: 'Chrome',
     openai: 'OpenAI',
     google: 'Google Gemini',
     anthropic: 'Anthropic',
@@ -236,6 +238,18 @@ export default function ChatInterface({
     const modelMenuRef = useRef<HTMLDivElement>(null);
     const searchInputRef = useRef<HTMLInputElement>(null);
     const [modelSearch, setModelSearch] = useState('');
+    const [chromeNanoAvailable, setChromeNanoAvailable] = useState(false);
+
+    useEffect(() => {
+        let mounted = true;
+        getChromeNanoAvailability().then(availability => {
+            if (mounted && availability === 'available') {
+                setChromeNanoAvailable(true);
+                setAvailableModels(prev => ({ ...prev, [CHROME_PROVIDER]: [CHROME_NANO_MODEL] }));
+            }
+        });
+        return () => { mounted = false; };
+    }, []);
 
     // Abort controller for streaming
     const abortControllerRef = useRef<AbortController | null>(null);
@@ -260,6 +274,7 @@ export default function ChatInterface({
     // Cleanup on unmount - always save state, DON'T abort the stream
     useEffect(() => {
         return () => {
+            destroyChromeNanoSession();
             // Always save current state on unmount so it can be restored
             if (onStateChange) {
                 onStateChange({
@@ -826,6 +841,9 @@ export default function ChatInterface({
     };
 
     const handleModelChange = async (provider: Provider, model: string) => {
+        if (provider !== config.selectedProvider || model !== config.selectedModel[config.selectedProvider]) {
+            destroyChromeNanoSession();
+        }
         const newConfig = {
             ...config,
             selectedProvider: provider,
@@ -1581,7 +1599,10 @@ export default function ChatInterface({
         }
     };
 
-    const allProviders = (Object.keys(config.apiKeys) as Provider[]).filter(p => config.apiKeys[p].length > 0);
+    const keyedProviders = (Object.keys(config.apiKeys) as Provider[]).filter(p => config.apiKeys[p].length > 0);
+    const allProviders = chromeNanoAvailable
+        ? [CHROME_PROVIDER, ...keyedProviders.filter(provider => provider !== CHROME_PROVIDER)]
+        : keyedProviders;
 
     const filteredModelGroups = allProviders.map(p => {
         const models = availableModels[p] || [config.selectedModel[p]];
@@ -1714,6 +1735,7 @@ export default function ChatInterface({
                 <div className="flex items-center gap-2" onMouseDown={e => e.stopPropagation()}>
                     <button
                         onClick={() => {
+                            destroyChromeNanoSession();
                             setMessages([]);
                             setInstruction('');
                             setSelectedText('');

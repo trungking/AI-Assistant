@@ -1,4 +1,5 @@
 import type { AppConfig, ChatMessage } from './types';
+import { callChromeNano, CHROME_PROVIDER } from './chromeNano';
 
 interface ApiResponse {
   text: string;
@@ -897,6 +898,10 @@ export const callApi = async (
   onReasoning?: (text: string) => void,
   onImage?: (imageUrl: string) => void
 ): Promise<ApiResponse> => {
+  if (config.selectedProvider === CHROME_PROVIDER) {
+    return callChromeNano(injectSystemPrompt(messages, config), onChunk, signal);
+  }
+
   // Check context
   if (window.location.protocol.startsWith('http')) {
     // Content Script -> Proxy to Background

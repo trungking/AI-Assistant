@@ -15,6 +15,7 @@ A powerful, modern Chrome extension that allows you to instantly process selecte
 
 ### 🤖 Multi-Provider Support
 Native support for multiple AI providers:
+- **Chrome Gemini Nano**: Free, private, on-device AI that runs locally on your computer with no API key
 - **Google AI Studio** (Gemini 3 Pro, Gemini 2.5 Flash, etc.)
 - **OpenAI** (GPT-5.2, o3, o1, GPT-4o, etc.)
 - **Anthropic** (Claude 4.5 Opus, Claude 4.5 Sonnet, Claude 4.5 Haiku, etc.)

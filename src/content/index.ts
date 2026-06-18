@@ -29,6 +29,7 @@ const DEFAULT_CONFIG: AppConfig = {
     },
     prompts: DEFAULT_PROMPTS,
     selectedModel: {
+        chrome: 'Gemini Nano',
         openai: 'gpt-4o-mini',
         google: 'gemini-1.5-flash',
         anthropic: 'claude-3-haiku-20240307',
