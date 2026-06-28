@@ -75,6 +75,7 @@ export interface AppConfig {
   alwaysExpandReasoning?: boolean; // Always expand reasoning content
   backupModels?: Record<string, Array<{ provider: string; model: string }>>;  // Backup models for quick retry
   visionModel?: { provider: string; model: string } | null; // Fallback model for vision/image requests
+  defaultModel?: { provider: string; model: string } | null; // Default model that the model selector resets to
   systemPrompt?: string; // Custom system prompt for all conversations
 }
 
@@ -121,5 +122,6 @@ export const DEFAULT_CONFIG: AppConfig = {
   alwaysExpandReasoning: false,
   backupModels: {},
   visionModel: null,
+  defaultModel: null,
   systemPrompt: 'You are a helpful assistant.\n\nToday\'s date is ${date}.'
 };

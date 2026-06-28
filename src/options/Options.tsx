@@ -3,7 +3,7 @@ import { type AppConfig, DEFAULT_CONFIG, type Provider, type PromptTemplate } fr
 import { getStorage, setStorage } from '../lib/storage';
 import { fetchModels } from '../lib/api';
 import { useTheme } from '../lib/theme';
-import { Trash2, Plus, RotateCcw, Eye, EyeOff, Key, MessageSquareText, Settings2, CheckCircle2, RefreshCw, List, Keyboard, Cpu, X, Download, Upload, GripVertical, ImageIcon } from 'lucide-react';
+import { Trash2, Plus, RotateCcw, Eye, EyeOff, Key, MessageSquareText, Settings2, CheckCircle2, RefreshCw, List, Keyboard, Cpu, X, Download, Upload, GripVertical, ImageIcon, Star } from 'lucide-react';
 import { SearchableSelect } from './SearchableSelect';
 import { clsx } from 'clsx';
 
@@ -46,6 +46,11 @@ export default function Options() {
     const [visionModelProvider, setVisionModelProvider] = useState<string>('');
     const [visionModelName, setVisionModelName] = useState<string>('');
     const [isVisionCustomModel, setIsVisionCustomModel] = useState(false);
+    // State for default model editing
+    const [editingDefaultModel, setEditingDefaultModel] = useState(false);
+    const [defaultModelProvider, setDefaultModelProvider] = useState<string>('');
+    const [defaultModelName, setDefaultModelName] = useState<string>('');
+    const [isDefaultCustomModel, setIsDefaultCustomModel] = useState(false);
 
     const allProviders = [...Providers, ...(config.customProviders || []).map(p => p.id)];
 
@@ -95,6 +100,15 @@ export default function Options() {
             }
         }
     }, [visionModelProvider, editingVisionModel]);
+
+    // Auto-fetch models when default model provider changes
+    useEffect(() => {
+        if (editingDefaultModel && defaultModelProvider) {
+            if (!fetchedModels[defaultModelProvider] && config.apiKeys[defaultModelProvider]?.length > 0 && defaultModelProvider !== 'anthropic') {
+                handleFetchModels(defaultModelProvider, true);
+            }
+        }
+    }, [defaultModelProvider, editingDefaultModel]);
 
     const saveConfig = async (newConfig: AppConfig) => {
         setConfig(newConfig);
@@ -727,6 +741,176 @@ export default function Options() {
                                                 }}
                                                 disabled={!visionModelProvider || !visionModelName.trim()}
                                                 className="flex-1 px-3 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-slate-300 dark:disabled:bg-slate-700 text-white font-medium text-sm rounded-lg transition-colors disabled:cursor-not-allowed"
+                                            >
+                                                Save
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Default Model Card */}
+                        <div className="bg-white dark:bg-gpt-sidebar rounded-2xl shadow-sm border border-slate-200 dark:border-gpt-hover p-6">
+                            <h3 className="text-base font-bold text-slate-900 dark:text-gpt-text mb-2 flex items-center gap-2">
+                                <div className="w-1 h-5 bg-blue-600 rounded-full"></div>
+                                <Star size={16} className="text-amber-500" />
+                                Default Model
+                            </h3>
+                            <p className="text-xs text-slate-500 dark:text-gpt-secondary mb-4">
+                                The default model is used as the quick-reset target. Click the reset button in the model selector popup to instantly switch back to this model. When set, this model is also used the first time you open the chat.
+                            </p>
+
+                            <div className="max-w-md space-y-3">
+                                {/* Current default model display */}
+                                {config.defaultModel && !editingDefaultModel ? (
+                                    <div className="flex items-center gap-2 group bg-slate-50 dark:bg-gpt-input p-3 rounded-lg border border-slate-200 dark:border-gpt-hover">
+                                        <div className="flex-1">
+                                            <div className="text-xs font-bold text-slate-700 dark:text-gpt-text">
+                                                {config.defaultModel.model}
+                                            </div>
+                                            <div className="text-[10px] text-slate-400 dark:text-gpt-secondary">
+                                                {(() => {
+                                                    const custom = config.customProviders?.find(cp => cp.id === config.defaultModel!.provider);
+                                                    return custom ? custom.name : (ProviderDisplayNames[config.defaultModel!.provider as Provider] || config.defaultModel!.provider);
+                                                })()}
+                                            </div>
+                                        </div>
+                                        <button
+                                            onClick={() => {
+                                                setEditingDefaultModel(true);
+                                                setDefaultModelProvider(config.defaultModel!.provider);
+                                                setDefaultModelName(config.defaultModel!.model);
+                                                setIsDefaultCustomModel(false);
+                                            }}
+                                            className="p-2 text-slate-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-lg transition-all duration-200 opacity-0 group-hover:opacity-100 focus:opacity-100"
+                                            title="Edit default model"
+                                        >
+                                            <Settings2 size={14} />
+                                        </button>
+                                        <button
+                                            onClick={() => saveConfig({ ...config, defaultModel: null })}
+                                            className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-all duration-200 opacity-0 group-hover:opacity-100 focus:opacity-100"
+                                            title="Remove default model"
+                                        >
+                                            <Trash2 size={14} />
+                                        </button>
+                                    </div>
+                                ) : !editingDefaultModel ? (
+                                    <div className="text-sm text-slate-400 italic bg-slate-50 dark:bg-gpt-input p-4 rounded-lg border border-slate-100 dark:border-gpt-hover text-center">
+                                        No default model set. The reset button in the model popup will be hidden.
+                                    </div>
+                                ) : null}
+
+                                {/* Edit / Add default model */}
+                                {!editingDefaultModel ? (
+                                    <button
+                                        onClick={() => {
+                                            setEditingDefaultModel(true);
+                                            setDefaultModelProvider(config.defaultModel?.provider || config.selectedProvider);
+                                            setDefaultModelName(config.defaultModel?.model || '');
+                                            setIsDefaultCustomModel(false);
+                                            if (!fetchedModels[config.defaultModel?.provider || config.selectedProvider] && config.apiKeys[config.defaultModel?.provider || config.selectedProvider]?.length > 0) {
+                                                handleFetchModels(config.defaultModel?.provider || config.selectedProvider, true);
+                                            }
+                                        }}
+                                        className="w-full px-4 py-2.5 bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/30 text-amber-600 dark:text-amber-400 font-medium text-sm rounded-lg border border-amber-200 dark:border-amber-800 transition-all flex items-center justify-center gap-2"
+                                    >
+                                        {config.defaultModel ? <Settings2 size={16} /> : <Plus size={16} />}
+                                        {config.defaultModel ? 'Change Default Model' : 'Set Default Model'}
+                                    </button>
+                                ) : (
+                                    <div className="p-4 bg-slate-50 dark:bg-gpt-input rounded-lg border border-slate-200 dark:border-gpt-hover space-y-3">
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-500 dark:text-gpt-secondary mb-1.5 uppercase tracking-wider">Provider</label>
+                                            <select
+                                                value={defaultModelProvider}
+                                                onChange={(e) => {
+                                                    setDefaultModelProvider(e.target.value);
+                                                    setDefaultModelName('');
+                                                    setIsDefaultCustomModel(false);
+                                                }}
+                                                className="w-full px-3 py-2 text-sm bg-white dark:bg-gpt-main border border-slate-200 dark:border-gpt-hover rounded-lg focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 outline-none transition-all dark:text-gpt-text"
+                                            >
+                                                {allProviders.map(provider => (
+                                                    <option key={provider} value={provider}>{getProviderName(provider)}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+
+                                        <div>
+                                            <div className="flex items-center justify-between mb-1.5">
+                                                <label className="block text-xs font-bold text-slate-500 dark:text-gpt-secondary uppercase tracking-wider">Model</label>
+                                                {defaultModelProvider !== 'anthropic' && (
+                                                    <button
+                                                        onClick={() => handleFetchModels(defaultModelProvider, true)}
+                                                        className="text-[10px] font-semibold text-amber-600 dark:text-amber-400 hover:text-amber-700 flex items-center gap-1 bg-amber-50 dark:bg-gpt-hover px-2 py-0.5 rounded hover:bg-amber-100 transition-colors"
+                                                        disabled={fetchingModels[defaultModelProvider]}
+                                                    >
+                                                        {fetchingModels[defaultModelProvider] ? <RefreshCw size={10} className="animate-spin" /> : <List size={10} />}
+                                                        {fetchingModels[defaultModelProvider] ? 'Loading...' : 'Refresh List'}
+                                                    </button>
+                                                )}
+                                            </div>
+                                            <div className="relative">
+                                                {fetchedModels[defaultModelProvider]?.length > 0 && !isDefaultCustomModel ? (
+                                                    <SearchableSelect
+                                                        value={defaultModelName}
+                                                        options={fetchedModels[defaultModelProvider]}
+                                                        onChange={(value) => setDefaultModelName(value)}
+                                                        onCustomClick={() => setIsDefaultCustomModel(true)}
+                                                        onOpen={() => handleFetchModels(defaultModelProvider, true)}
+                                                        placeholder="Select a default model..."
+                                                    />
+                                                ) : (
+                                                    <div className="relative">
+                                                        <input
+                                                            type="text"
+                                                            value={defaultModelName}
+                                                            onChange={(e) => setDefaultModelName(e.target.value)}
+                                                            placeholder="e.g. gpt-4o, gemini-1.5-flash..."
+                                                            className="w-full px-3 py-2.5 text-sm bg-slate-50 dark:bg-gpt-input border border-slate-200 dark:border-gpt-hover rounded-lg focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 outline-none transition-all dark:text-gpt-text"
+                                                        />
+                                                        {fetchedModels[defaultModelProvider]?.length > 0 && (
+                                                            <button
+                                                                onClick={() => setIsDefaultCustomModel(false)}
+                                                                className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-amber-600 hover:text-amber-700 font-medium px-2 py-1 bg-amber-50 rounded"
+                                                            >
+                                                                Back to List
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        <div className="flex gap-2 pt-1">
+                                            <button
+                                                onClick={() => {
+                                                    setEditingDefaultModel(false);
+                                                    setDefaultModelProvider('');
+                                                    setDefaultModelName('');
+                                                }}
+                                                className="flex-1 px-3 py-2 text-sm text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-gpt-hover rounded-lg transition-colors"
+                                            >
+                                                Cancel
+                                            </button>
+                                            <button
+                                                onClick={() => {
+                                                    if (!defaultModelProvider || !defaultModelName.trim()) return;
+                                                    saveConfig({
+                                                        ...config,
+                                                        defaultModel: {
+                                                            provider: defaultModelProvider,
+                                                            model: defaultModelName.trim()
+                                                        }
+                                                    });
+                                                    setEditingDefaultModel(false);
+                                                    setDefaultModelProvider('');
+                                                    setDefaultModelName('');
+                                                }}
+                                                disabled={!defaultModelProvider || !defaultModelName.trim()}
+                                                className="flex-1 px-3 py-2 bg-amber-600 hover:bg-amber-700 disabled:bg-slate-300 dark:disabled:bg-slate-700 text-white font-medium text-sm rounded-lg transition-colors disabled:cursor-not-allowed"
                                             >
                                                 Save
                                             </button>

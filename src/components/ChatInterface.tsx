@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { type AppConfig, type ChatMessage, type PromptTemplate, type Provider } from '../lib/types';
 import { callApi, fetchModels } from '../lib/api';
-import { Send, Settings, Sparkles, Loader2, User, Bot, Trash2, Zap, Image as ImageIcon, ChevronDown, ChevronRight, Check, X, Copy, PauseCircle, SquarePen, Clock, Globe, Link2, ExternalLink, Square, RefreshCw, Download } from 'lucide-react';
+import { Send, Settings, Sparkles, Loader2, User, Bot, Trash2, Zap, Image as ImageIcon, ChevronDown, ChevronRight, Check, X, Copy, PauseCircle, SquarePen, Clock, Globe, Link2, ExternalLink, Square, RefreshCw, Download, RotateCcw } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import type { PluggableList } from 'unified';
 import remarkGfm from 'remark-gfm';
@@ -1652,14 +1652,14 @@ export default function ChatInterface({
                                 onMouseDown={e => e.stopPropagation()}
                             >
                                 <div className="p-2 sticky top-0 bg-white dark:bg-gpt-sidebar z-10 border-b border-slate-100 dark:border-gpt-hover">
-                                    <div className="relative">
+                                    <div className="relative flex items-center">
                                         <input
                                             ref={searchInputRef}
                                             type="text"
                                             value={modelSearch}
                                             onChange={(e) => setModelSearch(e.target.value)}
                                             placeholder="Search models..."
-                                            className="w-full px-3 py-2 pr-8 text-xs bg-slate-50 dark:bg-gpt-input border border-slate-200 dark:border-gpt-hover rounded-lg focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 text-slate-900 dark:text-gpt-text placeholder:text-slate-400 transition-colors"
+                                            className="w-full px-3 py-2 pr-8 text-xs leading-5 bg-slate-50 dark:bg-gpt-input border border-slate-200 dark:border-gpt-hover rounded-lg focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 text-slate-900 dark:text-gpt-text placeholder:text-slate-400 transition-colors"
                                             onClick={(e) => e.stopPropagation()}
                                             onKeyDown={(e) => {
                                                 e.stopPropagation();
@@ -1676,14 +1676,34 @@ export default function ChatInterface({
                                                     setModelSearch('');
                                                     searchInputRef.current?.focus();
                                                 }}
-                                                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
+                                                className="absolute right-2 inset-y-0 my-auto flex items-center justify-center leading-none w-5 h-5 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-gpt-hover transition-colors"
                                                 title="Clear search"
                                             >
-                                                <X size={14} />
+                                                <X size={13} />
                                             </button>
                                         )}
                                     </div>
                                 </div>
+
+                                {config.defaultModel && !(
+                                    config.selectedProvider === config.defaultModel.provider &&
+                                    (config.selectedModel[config.defaultModel.provider] || '') === config.defaultModel.model
+                                ) && (
+                                    <button
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleModelChange(config.defaultModel!.provider as Provider, config.defaultModel!.model);
+                                        }}
+                                        className="mx-2 mt-1.5 flex items-center gap-1.5 px-2 py-1 text-[11px] font-semibold rounded-md border border-amber-200 dark:border-amber-800/60 bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/30 transition-colors"
+                                        title={`Reset selection to default (${config.defaultModel.model})`}
+                                    >
+                                        <RotateCcw size={11} className="shrink-0" />
+                                        <span>Reset to Default</span>
+                                        <span className="ml-auto font-normal text-amber-600/70 dark:text-amber-400/70 truncate max-w-[100px]">
+                                            {config.defaultModel.model}
+                                        </span>
+                                    </button>
+                                )}
 
                                 <div className="py-2 overflow-y-auto">
                                     {allProviders.length === 0 && (
