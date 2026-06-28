@@ -1,11 +1,17 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import ChatInterface from './ChatInterface';
 import type { AppConfig, PromptTemplate } from '../lib/types';
 import { useTheme } from '../lib/theme';
 import { useAppConfig, useChatState } from '../lib/hooks';
+import { matchesHotkey } from '../lib/hotkeys';
 import { setStorage } from '../lib/storage';
 
 export type PopupMode = 'extension' | 'content';
+
+const DEFAULT_ACTION_HOTKEYS = [
+    { key: 'y', modifiers: ['ctrl', 'shift'] },
+    { key: 'y', modifiers: ['meta', 'shift'] }
+];
 
 interface UnifiedPopupProps {
     mode: PopupMode;
@@ -74,6 +80,16 @@ export default function UnifiedPopup({
 
     // Theme handling
     const isDark = useTheme(config?.theme);
+    const customHotkey = config?.customHotkey;
+
+    // Handle close
+    const handleClose = useCallback(() => {
+        if (onClose) {
+            onClose();
+        } else if (!isContentMode) {
+            window.close();
+        }
+    }, [isContentMode, onClose]);
 
     // Apply theme to document for extension mode
     useEffect(() => {
@@ -81,6 +97,25 @@ export default function UnifiedPopup({
             document.documentElement.classList.toggle('dark', isDark);
         }
     }, [isDark, isContentMode]);
+
+    // Let the popup close itself when the opening hotkey is pressed while it has focus.
+    useEffect(() => {
+        if (isContentMode) return;
+
+        const handlePopupHotkey = (event: KeyboardEvent) => {
+            const matchesConfiguredHotkey = matchesHotkey(event, customHotkey);
+            const matchesDefaultActionHotkey = DEFAULT_ACTION_HOTKEYS.some(hotkey => matchesHotkey(event, hotkey));
+
+            if (!matchesConfiguredHotkey && !matchesDefaultActionHotkey) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+            handleClose();
+        };
+
+        window.addEventListener('keydown', handlePopupHotkey, true);
+        return () => window.removeEventListener('keydown', handlePopupHotkey, true);
+    }, [customHotkey, handleClose, isContentMode]);
 
     // Resolve pending auto prompt from ID for extension mode
     let resolvedPendingPrompt = pendingAutoPrompt;
@@ -144,15 +179,6 @@ export default function UnifiedPopup({
             const newConfig = { ...config, popupSize: { width: w, height: h } };
             updateConfig(newConfig);
             setSize({ width: w, height: h });
-        }
-    };
-
-    // Handle close
-    const handleClose = () => {
-        if (onClose) {
-            onClose();
-        } else if (!isContentMode) {
-            window.close();
         }
     };
 

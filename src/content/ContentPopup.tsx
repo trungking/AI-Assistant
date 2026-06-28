@@ -1,6 +1,7 @@
 import { createRoot, type Root } from 'react-dom/client';
 import UnifiedPopup from '../components/UnifiedPopup';
 import type { AppConfig, PromptTemplate } from '../lib/types';
+import { matchesHotkey } from '../lib/hotkeys';
 import styleText from '../index.css?inline';
 
 let root: Root | null = null;
@@ -81,6 +82,13 @@ export const openContentPopup = (
     // Use bubble phase (false) so React handlers can process events first
     // Then stop propagation to prevent parent page from intercepting
     const stopKeyboardPropagation = (e: Event) => {
+        if (e instanceof KeyboardEvent && e.type === 'keydown' && matchesHotkey(e, config.customHotkey)) {
+            e.preventDefault();
+            e.stopPropagation();
+            closeContentPopup();
+            return;
+        }
+
         e.stopPropagation();
     };
     shadowContainer.addEventListener('keydown', stopKeyboardPropagation, false);
