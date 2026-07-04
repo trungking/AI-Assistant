@@ -1,4 +1,5 @@
 import { DEFAULT_CONFIG } from '../lib/types';
+import { getStorage, setStorage } from '../lib/storage';
 
 /**
  * Convert an image URL to a base64 data URL.
@@ -42,7 +43,7 @@ chrome.runtime.onInstalled.addListener(async () => {
     // Initialize storage with defaults if not present
     const { appConfig } = await chrome.storage.sync.get('appConfig');
     if (!appConfig) {
-        await chrome.storage.sync.set({ appConfig: DEFAULT_CONFIG });
+        await setStorage(DEFAULT_CONFIG);
     }
 
     // Create context menu
@@ -98,8 +99,8 @@ const openUi = async () => {
 };
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-    const { appConfig } = await chrome.storage.sync.get('appConfig');
-    const mode = (appConfig as any)?.popupMode || 'extension';
+    const appConfig = await getStorage();
+    const mode = appConfig.popupMode || 'extension';
 
     if (info.menuItemId === "ai-ask-context" && tab?.id) {
         let selectedText = info.selectionText || '';
@@ -477,8 +478,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else if (message.action === 'open_with_image') {
         // Open popup with cropped image
         (async () => {
-            const { appConfig } = await chrome.storage.sync.get('appConfig');
-            const mode = (appConfig as any)?.popupMode || 'extension';
+            const appConfig = await getStorage();
+            const mode = appConfig.popupMode || 'extension';
             const tabId = sender.tab?.id;
 
             if (mode === 'content_script' && tabId) {

@@ -11,6 +11,8 @@ const DEFAULT_PROMPTS: PromptTemplate[] = [
     { id: '4', name: 'Fix Grammar', content: 'Fix the grammar and improve the writing of the following text:\n\n${text}' },
 ];
 
+const SYSTEM_PROMPT_STORAGE_KEY = 'appConfig.systemPrompt';
+
 const DEFAULT_CONFIG: AppConfig = {
     apiKeys: {
         openai: [],
@@ -43,7 +45,8 @@ const DEFAULT_CONFIG: AppConfig = {
     popupMode: 'extension',
     popupSize: { width: 450, height: 600 },
     webSearchProvider: 'perplexity',
-    kagiSession: ''
+    kagiSession: '',
+    systemPrompt: 'You are a helpful assistant.\n\nToday\'s date is ${date}.'
 };
 
 /**
@@ -126,15 +129,21 @@ const extractTextFromSelection = (): string => {
 };
 
 const getStorage = async (): Promise<AppConfig> => {
-    const result = await chrome.storage.sync.get('appConfig');
-    if (!result.appConfig) return DEFAULT_CONFIG;
+    const [syncResult, localResult] = await Promise.all([
+        chrome.storage.sync.get('appConfig'),
+        chrome.storage.local.get(SYSTEM_PROMPT_STORAGE_KEY),
+    ]);
 
-    const stored = result.appConfig as Partial<AppConfig>;
+    const stored = (syncResult.appConfig || {}) as Partial<AppConfig>;
+    const localSystemPrompt = localResult[SYSTEM_PROMPT_STORAGE_KEY];
 
     // Deep merge for nested objects
     return {
         ...DEFAULT_CONFIG,
         ...stored,
+        systemPrompt: typeof localSystemPrompt === 'string'
+            ? localSystemPrompt
+            : stored.systemPrompt ?? DEFAULT_CONFIG.systemPrompt,
         apiKeys: { ...DEFAULT_CONFIG.apiKeys, ...stored.apiKeys },
         customBaseUrls: { ...DEFAULT_CONFIG.customBaseUrls, ...stored.customBaseUrls },
         selectedModel: { ...DEFAULT_CONFIG.selectedModel, ...stored.selectedModel },
@@ -154,8 +163,14 @@ const init = async () => {
 
 // Listen for storage changes to update config dynamically
 chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'sync' && changes.appConfig) {
-        config = changes.appConfig.newValue as AppConfig;
+    if ((area === 'sync' && changes.appConfig) || (area === 'local' && changes[SYSTEM_PROMPT_STORAGE_KEY])) {
+        getStorage()
+            .then(freshConfig => {
+                config = freshConfig;
+            })
+            .catch(e => {
+                console.error('[AI Assistant] Failed to refresh config:', e);
+            });
     }
 });
 

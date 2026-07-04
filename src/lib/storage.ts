@@ -1,16 +1,29 @@
 import { type AppConfig, DEFAULT_CONFIG } from './types';
 
+const SYSTEM_PROMPT_STORAGE_KEY = 'appConfig.systemPrompt';
+
+// Keep long prompt text out of chrome.storage.sync's 8 KB per-item quota.
+const stripLocalOnlyConfig = (config: AppConfig): Omit<AppConfig, 'systemPrompt'> => {
+  const { systemPrompt: _systemPrompt, ...syncConfig } = config;
+  return syncConfig;
+};
+
 export const getStorage = async (): Promise<AppConfig> => {
-  const result = await chrome.storage.sync.get('appConfig');
-  if (!result.appConfig) {
-    return DEFAULT_CONFIG;
-  }
+  const [syncResult, localResult] = await Promise.all([
+    chrome.storage.sync.get('appConfig'),
+    chrome.storage.local.get(SYSTEM_PROMPT_STORAGE_KEY),
+  ]);
 
   // Deep merge to ensure new providers are included when loading old config
-  const stored = result.appConfig as Partial<AppConfig>;
+  const stored = (syncResult.appConfig || {}) as Partial<AppConfig>;
+  const localSystemPrompt = localResult[SYSTEM_PROMPT_STORAGE_KEY];
+
   return {
     ...DEFAULT_CONFIG,
     ...stored,
+    systemPrompt: typeof localSystemPrompt === 'string'
+      ? localSystemPrompt
+      : stored.systemPrompt ?? DEFAULT_CONFIG.systemPrompt,
     // Deep merge nested objects to include new provider defaults
     apiKeys: { ...DEFAULT_CONFIG.apiKeys, ...stored.apiKeys },
     customBaseUrls: { ...DEFAULT_CONFIG.customBaseUrls, ...stored.customBaseUrls },
@@ -19,7 +32,16 @@ export const getStorage = async (): Promise<AppConfig> => {
 };
 
 export const setStorage = async (config: AppConfig): Promise<void> => {
-  await chrome.storage.sync.set({ appConfig: config });
+  const syncConfig = stripLocalOnlyConfig(config);
+
+  await chrome.storage.local.set({
+    [SYSTEM_PROMPT_STORAGE_KEY]: config.systemPrompt ?? '',
+  });
+
+  const { appConfig } = await chrome.storage.sync.get('appConfig');
+  if (JSON.stringify(appConfig || {}) !== JSON.stringify(syncConfig)) {
+    await chrome.storage.sync.set({ appConfig: syncConfig });
+  }
 };
 
 /**
