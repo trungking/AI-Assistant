@@ -18,6 +18,9 @@ export const startCropMode = (onComplete: (imageDataUrl: string) => void, onCanc
     // Create container - use direct DOM styles, no shadow DOM to avoid complexity
     cropContainer = document.createElement('div');
     cropContainer.id = 'ai-ask-crop-overlay-host';
+    // Focusable so keyboard events land in the top document even when focus was
+    // inside an iframe or a page input before crop mode started.
+    cropContainer.tabIndex = -1;
     Object.assign(cropContainer.style, {
         position: 'fixed',
         zIndex: '2147483647',
@@ -28,9 +31,11 @@ export const startCropMode = (onComplete: (imageDataUrl: string) => void, onCanc
         margin: '0',
         padding: '0',
         border: 'none',
+        outline: 'none',
         pointerEvents: 'auto'
     });
     document.body.appendChild(cropContainer);
+    cropContainer.focus({ preventScroll: true });
 
     const mountPoint = document.createElement('div');
     Object.assign(mountPoint.style, {
@@ -40,24 +45,51 @@ export const startCropMode = (onComplete: (imageDataUrl: string) => void, onCanc
     cropContainer.appendChild(mountPoint);
     cropRoot = createRoot(mountPoint);
 
+    let finished = false;
+
     const handleComplete = (dataUrl: string) => {
+        if (finished) return;
+        finished = true;
         cleanup();
         onComplete(dataUrl);
     };
 
     const handleCancel = () => {
+        if (finished) return;
+        finished = true;
         cleanup();
         onCancel();
     };
 
+    // Escape handling lives here (not only in the component) so it is active
+    // immediately, before React mounts and while the screenshot is still being
+    // captured. Capture phase + stopImmediatePropagation so pages that swallow
+    // keydown for their own shortcuts/modals cannot eat the cancel key.
+    const handleEscape = (e: KeyboardEvent) => {
+        if (e.key !== 'Escape' && e.key !== 'Esc') return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        handleCancel();
+    };
+    window.addEventListener('keydown', handleEscape, true);
+    document.addEventListener('keydown', handleEscape, true);
+
     const cleanup = () => {
-        if (cropRoot) {
-            cropRoot.unmount();
-            cropRoot = null;
-        }
+        window.removeEventListener('keydown', handleEscape, true);
+        document.removeEventListener('keydown', handleEscape, true);
+
+        const rootToUnmount = cropRoot;
+        cropRoot = null;
         if (cropContainer) {
             cropContainer.remove();
             cropContainer = null;
+        }
+        // Deferred: cancel can be triggered from inside a React event handler
+        // (Cancel button / right-click), and unmounting a root synchronously
+        // while React is rendering is not allowed.
+        if (rootToUnmount) {
+            setTimeout(() => rootToUnmount.unmount(), 0);
         }
     };
 
@@ -98,18 +130,29 @@ const CropOverlay = ({ onComplete, onCancel }: CropOverlayProps) => {
     }, [onCancel]);
 
     const handleKeyDown = useCallback((e: KeyboardEvent) => {
-        if (e.key === 'Escape') {
+        if (e.key === 'Escape' || e.key === 'Esc') {
             e.preventDefault();
+            e.stopPropagation();
             onCancel();
         }
     }, [onCancel]);
 
     useEffect(() => {
-        window.addEventListener('keydown', handleKeyDown);
-        return () => window.removeEventListener('keydown', handleKeyDown);
+        // Capture phase: page handlers must not be able to stop the cancel key.
+        window.addEventListener('keydown', handleKeyDown, true);
+        return () => window.removeEventListener('keydown', handleKeyDown, true);
     }, [handleKeyDown]);
 
+    // Right-click cancels too, matching common screenshot tools and giving a
+    // mouse-only way out if the page fights over the keyboard.
+    const handleContextMenu = (e: React.MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onCancel();
+    };
+
     const handleMouseDown = (e: React.MouseEvent) => {
+        if (e.button !== 0) return; // let right/middle click through to cancel
         e.preventDefault();
         setIsSelecting(true);
         setStartPos({ x: e.clientX, y: e.clientY });
@@ -211,6 +254,8 @@ const CropOverlay = ({ onComplete, onCancel }: CropOverlayProps) => {
         whiteSpace: 'nowrap'
     };
 
+    const instructionsText = 'Click and drag to select an area • ESC or right-click to cancel';
+
     const sizeIndicatorStyle: React.CSSProperties = {
         position: 'fixed',
         background: 'rgba(0, 0, 0, 0.85)',
@@ -245,12 +290,15 @@ const CropOverlay = ({ onComplete, onCancel }: CropOverlayProps) => {
         zIndex: 1000000
     };
 
+    const instructionsBar = <div style={instructionsStyle}>{instructionsText}</div>;
+
     if (!screenshot) {
         return (
-            <div style={{ ...overlayStyle, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <div style={instructionsStyle}>
-                    Click and drag to select an area • Press ESC to cancel
-                </div>
+            <div
+                style={{ ...overlayStyle, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                onContextMenu={handleContextMenu}
+            >
+                {instructionsBar}
             </div>
         );
     }
@@ -270,6 +318,7 @@ const CropOverlay = ({ onComplete, onCancel }: CropOverlayProps) => {
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}
                 onMouseUp={handleMouseUp}
+                onContextMenu={handleContextMenu}
             />
 
             {/* Dark overlay with cutout - shows selected area clearly */}
@@ -323,9 +372,7 @@ const CropOverlay = ({ onComplete, onCancel }: CropOverlayProps) => {
             )}
 
             {/* Instructions */}
-            <div style={instructionsStyle}>
-                Click and drag to select an area • Press ESC to cancel
-            </div>
+            {instructionsBar}
         </>
     );
 };
