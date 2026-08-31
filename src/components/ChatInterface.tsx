@@ -169,7 +169,7 @@ const CodeBlock = ({ node, children, ...props }: any) => {
             >
                 {copied ? <Check size={12} className="text-green-500" /> : <Copy size={12} />}
             </button>
-            <pre {...props}>{children}</pre>
+            <pre {...props} className="whitespace-pre-wrap break-words">{children}</pre>
         </div>
     );
 };
