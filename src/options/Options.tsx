@@ -506,13 +506,15 @@ export default function Options() {
                                             disabled={!(
                                                 config.webSearchProvider === 'kagi' ? config.kagiSession :
                                                     config.webSearchProvider === 'google' ? true :
-                                                        config.apiKeys['perplexity']?.length
+                                                        config.webSearchProvider === 'brave' ? (config.braveApiKeys || []).some(k => k.trim()) :
+                                                            config.apiKeys['perplexity']?.length
                                             )}
                                         />
                                         <div className={`w-11 h-6 bg-slate-200 dark:bg-gpt-input peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600 ${!(
                                             config.webSearchProvider === 'kagi' ? config.kagiSession :
                                                 config.webSearchProvider === 'google' ? true :
-                                                    config.apiKeys['perplexity']?.length
+                                                    config.webSearchProvider === 'brave' ? (config.braveApiKeys || []).some(k => k.trim()) :
+                                                        config.apiKeys['perplexity']?.length
                                         ) ? 'opacity-50' : ''}`}></div>
                                     </div>
                                 </label>
@@ -523,11 +525,12 @@ export default function Options() {
                                     <div className="relative">
                                         <select
                                             value={config.webSearchProvider || 'perplexity'}
-                                            onChange={(e) => saveConfig({ ...config, webSearchProvider: e.target.value as 'perplexity' | 'kagi' | 'google' })}
+                                            onChange={(e) => saveConfig({ ...config, webSearchProvider: e.target.value as 'perplexity' | 'kagi' | 'google' | 'brave' })}
                                             className="w-full p-3 bg-slate-50 dark:bg-gpt-input border border-slate-200 dark:border-gpt-hover rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all font-medium text-slate-700 dark:text-gpt-text appearance-none"
                                         >
                                             <option value="perplexity">Perplexity (API Key)</option>
                                             <option value="kagi">Kagi (Session Cookie)</option>
+                                            <option value="brave">Brave Search (API Keys, Round-Robin)</option>
                                             <option value="google">Google Grounding Search (Google API Key)</option>
                                         </select>
                                         <div className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
@@ -561,6 +564,68 @@ export default function Options() {
                                     </div>
                                 )}
 
+                                {/* Brave API Keys Input (multiple keys, round-robin) */}
+                                {(config.webSearchProvider === 'brave') && (
+                                    <div className="space-y-3">
+                                        <div className="flex items-center justify-between">
+                                            <label className="block text-xs font-semibold text-slate-500 dark:text-gpt-secondary uppercase tracking-wider">Brave Search API Keys</label>
+                                            <button
+                                                onClick={() => saveConfig({ ...config, braveApiKeys: [...(config.braveApiKeys || []), ''] })}
+                                                className="text-xs font-semibold bg-white dark:bg-gpt-input text-blue-600 dark:text-blue-400 border border-blue-100 dark:border-gpt-hover px-3 py-1.5 rounded-lg hover:bg-blue-50 dark:hover:bg-gpt-hover hover:border-blue-200 transition-colors flex items-center gap-1.5 shadow-sm"
+                                            >
+                                                <Plus size={14} /> Add Key
+                                            </button>
+                                        </div>
+                                        {(config.braveApiKeys || []).length === 0 && (
+                                            <div className="text-sm text-slate-400 italic bg-slate-50 dark:bg-gpt-input p-4 rounded-lg border border-slate-100 dark:border-gpt-hover text-center">
+                                                No Brave Search API keys configured.
+                                            </div>
+                                        )}
+                                        {(config.braveApiKeys || []).map((key, idx) => (
+                                            <div key={idx} className="flex items-center gap-2 group">
+                                                <div className="relative flex-1">
+                                                    <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
+                                                        <Key size={14} />
+                                                    </div>
+                                                    <input
+                                                        type={showKey[`brave-${idx}`] ? "text" : "password"}
+                                                        value={key}
+                                                        onChange={(e) => {
+                                                            const keys = [...(config.braveApiKeys || [])];
+                                                            keys[idx] = e.target.value;
+                                                            saveConfig({ ...config, braveApiKeys: keys });
+                                                        }}
+                                                        placeholder={`Brave API Key #${idx + 1}`}
+                                                        className="w-full pl-9 pr-10 py-2.5 text-sm font-mono bg-white dark:bg-gpt-input border border-slate-200 dark:border-gpt-hover rounded-lg focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all shadow-sm group-hover:border-slate-300 dark:group-hover:border-gpt-text dark:text-gpt-text"
+                                                    />
+                                                    <button
+                                                        onClick={() => toggleShowKey(`brave-${idx}`)}
+                                                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors"
+                                                        tabIndex={-1}
+                                                    >
+                                                        {showKey[`brave-${idx}`] ? <EyeOff size={14} /> : <Eye size={14} />}
+                                                    </button>
+                                                </div>
+                                                <button
+                                                    onClick={() => saveConfig({ ...config, braveApiKeys: (config.braveApiKeys || []).filter((_, i) => i !== idx) })}
+                                                    className="p-2.5 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-all duration-200 opacity-0 group-hover:opacity-100 focus:opacity-100"
+                                                    title="Remove key"
+                                                >
+                                                    <Trash2 size={16} />
+                                                </button>
+                                            </div>
+                                        ))}
+                                        {(config.braveApiKeys || []).filter(k => k.trim()).length > 1 && (
+                                            <p className="text-xs text-slate-400 dark:text-gpt-secondary">
+                                                {`Keys rotate round-robin: ${(config.braveApiKeys || []).filter(k => k.trim()).length} keys configured.`}
+                                            </p>
+                                        )}
+                                        <p className="text-xs text-slate-400 dark:text-gpt-secondary mt-2">
+                                            Get a free API key at <a href="https://api-dashboard.search.brave.com/" target="_blank" rel="noreferrer" className="text-blue-500 hover:underline">api-dashboard.search.brave.com</a>. Keys are used one after another (round-robin) to spread the request quota.
+                                        </p>
+                                    </div>
+                                )}
+
                                 {/* Warning Messages */}
                                 {config.webSearchProvider === 'kagi' && !config.kagiSession && (
                                     <p className="text-xs text-amber-600 dark:text-amber-400 mt-3 flex items-center gap-1.5">
@@ -575,6 +640,11 @@ export default function Options() {
                                 {config.webSearchProvider === 'perplexity' && !config.apiKeys['perplexity']?.length && (
                                     <p className="text-xs text-amber-600 dark:text-amber-400 mt-3 flex items-center gap-1.5">
                                         ⚠️ Add a Perplexity API key in the Providers tab to enable web search.
+                                    </p>
+                                )}
+                                {config.webSearchProvider === 'brave' && !(config.braveApiKeys || []).some(k => k.trim()) && (
+                                    <p className="text-xs text-amber-600 dark:text-amber-400 mt-3 flex items-center gap-1.5">
+                                        ⚠️ Add at least one Brave Search API key to enable web search.
                                     </p>
                                 )}
                             </div>

@@ -608,6 +608,100 @@ const executeGoogleWebSearch = async (query: string, config: AppConfig, signal?:
   }
 };
 
+// Brave API key round-robin state (persisted so rotation survives restarts)
+const BRAVE_RR_STORAGE_KEY = 'braveKeyIndex';
+
+const nextBraveKey = async (keys: string[]): Promise<string> => {
+  if (keys.length === 1) return keys[0];
+  try {
+    const result = await chrome.storage.local.get(BRAVE_RR_STORAGE_KEY) as Record<string, number>;
+    const prev = typeof result[BRAVE_RR_STORAGE_KEY] === 'number' ? result[BRAVE_RR_STORAGE_KEY] : -1;
+    const next = (prev + 1) % keys.length;
+    await chrome.storage.local.set({ [BRAVE_RR_STORAGE_KEY]: next });
+    return keys[next];
+  } catch {
+    // Fallback to in-memory rotation if storage is unavailable
+    return keys[Math.floor(Math.random() * keys.length)];
+  }
+};
+
+// Strip HTML tags from Brave result descriptions
+const stripHtml = (html: string): string => html
+  .replace(/<[^>]*>/g, '')
+  .replace(/&amp;/g, '&')
+  .replace(/&lt;/g, '<')
+  .replace(/&gt;/g, '>')
+  .replace(/&quot;/g, '"')
+  .replace(/&#x27;|&#39;/g, "'")
+  .replace(/&nbsp;/g, ' ');
+
+// Execute web search using Brave Search API (round-robin across multiple keys)
+const executeBraveWebSearch = async (query: string, config: AppConfig, signal?: AbortSignal): Promise<WebSearchResult> => {
+  const keys = (config.braveApiKeys || []).map(k => k.trim()).filter(Boolean);
+  if (keys.length === 0) {
+    return { content: 'Error: No Brave Search API key configured for web search.', sources: [] };
+  }
+
+  const apiKey = await nextBraveKey(keys);
+  const baseUrl = config.customBaseUrls['brave'] || 'https://api.search.brave.com/res/v1';
+
+  try {
+    const params = new URLSearchParams({
+      q: query,
+      count: '10',
+      text_decorations: 'false'
+    });
+
+    const response = await fetch(`${baseUrl}/web/search?${params.toString()}`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'Accept-Encoding': 'gzip',
+        'X-Subscription-Token': apiKey
+      },
+      signal
+    });
+
+    if (!response.ok) {
+      let errText = response.statusText;
+      try {
+        const err = await response.json();
+        errText = err.error?.message || err.message || errText;
+      } catch { /* keep statusText */ }
+      // Rotate away from an exhausted/invalid key
+      if (isQuotaError(errText)) {
+        await markKeyExhausted(apiKey, 'brave');
+      }
+      return { content: `Brave search error: ${errText}`, sources: [] };
+    }
+
+    const data = await response.json();
+
+    const results: any[] = data.web?.results || [];
+    const sources: Array<{ title: string; url: string; snippet?: string }> = [];
+    const lines: string[] = [];
+
+    results.forEach((item: any, index: number) => {
+      const title = stripHtml(item.title || `Result ${index + 1}`);
+      const url = item.url || '';
+      const snippet = stripHtml(item.description || item.extra_snippets?.[0] || '');
+      sources.push({ title, url, snippet });
+      lines.push(`[${index + 1}] ${title}\n${url}${snippet ? `\n${snippet}` : ''}`);
+    });
+
+    if (lines.length === 0) {
+      return { content: 'No search results found.', sources: [] };
+    }
+
+    return {
+      content: `Web search results for "${query}":\n\n${lines.join('\n\n')}`,
+      sources
+    };
+  } catch (e: any) {
+    return { content: `Brave search failed: ${e.message}`, sources: [] };
+  }
+};
+
 // Main web search dispatcher
 const executeWebSearch = async (query: string, config: AppConfig, signal?: AbortSignal): Promise<WebSearchResult> => {
   const provider = config.webSearchProvider || 'perplexity';
@@ -622,6 +716,10 @@ const executeWebSearch = async (query: string, config: AppConfig, signal?: Abort
 
   if (provider === 'google') {
     return executeGoogleWebSearch(query, config, signal);
+  }
+
+  if (provider === 'brave') {
+    return executeBraveWebSearch(query, config, signal);
   }
 
   // Default to Perplexity
@@ -639,6 +737,7 @@ const shouldEnableWebSearch = (config: AppConfig, model?: string): boolean => {
   const hasPerplexityKey = config.apiKeys['perplexity']?.length > 0;
   const hasKagiSession = !!config.kagiSession;
   const hasGoogleKey = config.apiKeys['google']?.length > 0;
+  const hasBraveKey = (config.braveApiKeys || []).filter(k => k.trim()).length > 0;
 
   // Check if current provider has API key
   const currentProvider = config.selectedProvider;
@@ -664,6 +763,12 @@ const shouldEnableWebSearch = (config: AppConfig, model?: string): boolean => {
     hasWebSearchCredentials = hasKagiSession;
   } else if (webSearchProvider === 'google') {
     hasWebSearchCredentials = usingGoogleGroundingNatively || hasGoogleKey || hasCurrentProviderKey;
+  } else if (webSearchProvider === 'brave') {
+    // Gemini models always use native google_search grounding (brave never overrides it);
+    // brave keys only gate the function-tool path for non-Gemini models.
+    hasWebSearchCredentials = isGeminiModel
+      ? (hasGoogleKey || hasCurrentProviderKey)
+      : hasBraveKey;
   } else {
     hasWebSearchCredentials = hasPerplexityKey;
   }
@@ -1393,8 +1498,10 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
   // Detect web search configuration early to conditionally add instructions
   const webSearchEnabled = config && shouldEnableWebSearch(config, model);
   const isGeminiModel = /^gemini-/.test(model);
+  // Gemini models keep native google_search grounding; brave must NOT override it.
+  // Brave is only used as the search backend for non-Gemini models.
   const useNativeGoogleSearch = webSearchEnabled &&
-    config?.webSearchProvider === 'google' &&
+    (config?.webSearchProvider === 'google' || config?.webSearchProvider === 'brave') &&
     isGeminiModel;
 
   // Detect OpenAI native web search (GPT models on OpenAI provider)
@@ -2048,8 +2155,9 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
   // Check if we should enable Google Grounding Search for Gemini models
   // Native support for models like gemini-2.0-flash-exp, gemini-1.5-pro, etc.
   const isGeminiModel = /^gemini-\d+/.test(model);
+  // Gemini models keep native google_search grounding; brave must NOT override it.
   const useGoogleSearch = config &&
-    config.webSearchProvider === 'google' &&
+    (config.webSearchProvider === 'google' || config.webSearchProvider === 'brave') &&
     config.enableWebSearch !== false &&
     isGeminiModel &&
     config.apiKeys['google']?.length > 0;

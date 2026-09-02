@@ -70,8 +70,9 @@ export interface AppConfig {
   popupMode?: 'extension' | 'content_script';
   popupSize?: { width: number; height: number };
   enableWebSearch?: boolean; // Enable web search tool
-  webSearchProvider: 'perplexity' | 'kagi' | 'google'; // Which provider to use for web search
+  webSearchProvider: 'perplexity' | 'kagi' | 'google' | 'brave'; // Which provider to use for web search
   kagiSession?: string; // Kagi session cookie for web search
+  braveApiKeys?: string[]; // Brave Search API keys (rotated round-robin)
   alwaysExpandReasoning?: boolean; // Always expand reasoning content
   backupModels?: Record<string, Array<{ provider: string; model: string }>>;  // Backup models for quick retry
   visionModel?: { provider: string; model: string } | null; // Fallback model for vision/image requests
@@ -119,6 +120,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   popupSize: { width: 450, height: 600 },
   webSearchProvider: 'perplexity',
   kagiSession: '',
+  braveApiKeys: [],
   alwaysExpandReasoning: false,
   backupModels: {},
   visionModel: null,

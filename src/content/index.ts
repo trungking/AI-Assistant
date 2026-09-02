@@ -46,6 +46,7 @@ const DEFAULT_CONFIG: AppConfig = {
     popupSize: { width: 450, height: 600 },
     webSearchProvider: 'perplexity',
     kagiSession: '',
+    braveApiKeys: [],
     systemPrompt: 'You are a helpful assistant.\n\nToday\'s date is ${date}.'
 };
 

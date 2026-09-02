@@ -27,6 +27,7 @@ Native support for multiple AI providers:
 AI models can search the web for up-to-date information:
 - **Perplexity**: Use Perplexity API for web search via function calling
 - **Kagi**: Use Kagi search with your session cookie
+- **Brave Search**: Use Brave Search API with multiple API keys rotated round-robin
 - **Sources Display**: View clickable citations from search results
 - Works with any AI provider (except Perplexity which has built-in search)
 
