@@ -1,10 +1,17 @@
 import { createRoot, type Root } from 'react-dom/client';
 import { useState, useEffect, useCallback } from 'react';
+import { captureScreenshot } from './captureScreenshot';
 
 let cropRoot: Root | null = null;
 let cropContainer: HTMLElement | null = null;
+let cancelActiveCrop: (() => void) | null = null;
+
+// This entry is injected into tabs and does not use React Fast Refresh.
+// eslint-disable-next-line react-refresh/only-export-components
+export const cancelCropMode = () => cancelActiveCrop?.();
 
 export const startCropMode = (onComplete: (imageDataUrl: string) => void, onCancel: () => void) => {
+    cancelCropMode();
     // Remove existing
     if (cropRoot) {
         cropRoot.unmount();
@@ -76,6 +83,7 @@ export const startCropMode = (onComplete: (imageDataUrl: string) => void, onCanc
     document.addEventListener('keydown', handleEscape, true);
 
     const cleanup = () => {
+        cancelActiveCrop = null;
         window.removeEventListener('keydown', handleEscape, true);
         document.removeEventListener('keydown', handleEscape, true);
 
@@ -93,6 +101,8 @@ export const startCropMode = (onComplete: (imageDataUrl: string) => void, onCanc
         }
     };
 
+    cancelActiveCrop = handleCancel;
+
     cropRoot.render(
         <CropOverlay onComplete={handleComplete} onCancel={handleCancel} />
     );
@@ -108,25 +118,21 @@ const CropOverlay = ({ onComplete, onCancel }: CropOverlayProps) => {
     const [startPos, setStartPos] = useState({ x: 0, y: 0 });
     const [currentPos, setCurrentPos] = useState({ x: 0, y: 0 });
     const [screenshot, setScreenshot] = useState<string | null>(null);
+    const [captureError, setCaptureError] = useState<string | null>(null);
 
     // Capture screenshot on mount
     useEffect(() => {
+        let disposed = false;
         const captureScreen = async () => {
             try {
-                // Request screenshot from background script
-                const response = await chrome.runtime.sendMessage({ action: 'capture_screenshot' });
-                if (response?.dataUrl) {
-                    setScreenshot(response.dataUrl);
-                } else {
-                    console.error('Failed to capture screenshot:', response?.error);
-                    onCancel();
-                }
+                const dataUrl = await captureScreenshot();
+                if (!disposed) setScreenshot(dataUrl);
             } catch (err) {
-                console.error('Failed to capture screenshot:', err);
-                onCancel();
+                if (!disposed) setCaptureError(err instanceof Error ? err.message : String(err));
             }
         };
         captureScreen();
+        return () => { disposed = true; };
     }, [onCancel]);
 
     const handleKeyDown = useCallback((e: KeyboardEvent) => {
@@ -194,21 +200,22 @@ const CropOverlay = ({ onComplete, onCancel }: CropOverlayProps) => {
                 return;
             }
 
-            // Account for device pixel ratio
-            const dpr = window.devicePixelRatio || 1;
-            canvas.width = width * dpr;
-            canvas.height = height * dpr;
+            // Use the actual bitmap scale (Retina and browser zoom can differ).
+            const scaleX = img.naturalWidth / window.innerWidth;
+            const scaleY = img.naturalHeight / window.innerHeight;
+            canvas.width = Math.round(width * scaleX);
+            canvas.height = Math.round(height * scaleY);
 
             ctx.drawImage(
                 img,
-                x * dpr,
-                y * dpr,
-                width * dpr,
-                height * dpr,
+                x * scaleX,
+                y * scaleY,
+                width * scaleX,
+                height * scaleY,
                 0,
                 0,
-                width * dpr,
-                height * dpr
+                canvas.width,
+                canvas.height
             );
 
             const croppedDataUrl = canvas.toDataURL('image/png');
@@ -295,10 +302,15 @@ const CropOverlay = ({ onComplete, onCancel }: CropOverlayProps) => {
     if (!screenshot) {
         return (
             <div
-                style={{ ...overlayStyle, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                style={{ ...overlayStyle, backgroundColor: captureError ? 'rgba(0, 0, 0, 0.3)' : 'transparent' }}
                 onContextMenu={handleContextMenu}
             >
-                {instructionsBar}
+                {captureError && (
+                    <div style={{ ...instructionsStyle, pointerEvents: 'auto', whiteSpace: 'normal', maxWidth: 500 }} role="alert">
+                        {captureError}
+                        <button type="button" onClick={onCancel} style={{ display: 'block', marginTop: 12 }}>Close</button>
+                    </div>
+                )}
             </div>
         );
     }
@@ -378,4 +390,3 @@ const CropOverlay = ({ onComplete, onCancel }: CropOverlayProps) => {
 };
 
 export default CropOverlay;
-

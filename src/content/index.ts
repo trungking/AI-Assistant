@@ -1,6 +1,6 @@
 import type { AppConfig, PromptTemplate } from '../lib/types';
-import { openContentPopup, closeContentPopup, isContentPopupOpen } from './ContentPopup';
-import { startCropMode } from './CropOverlay';
+import { openContentPopup, closeContentPopup, isContentPopupOpen, forceCloseContentPopup } from './ContentPopup';
+import { startCropMode, cancelCropMode } from './CropOverlay';
 
 // Inline Default Config to avoid shared chunk import issues in content scripts
 // (Or import from types if build confirms it works, forcing inline here for safety as before)
@@ -163,7 +163,7 @@ const init = async () => {
 };
 
 // Listen for storage changes to update config dynamically
-chrome.storage.onChanged.addListener((changes, area) => {
+const handleStorageChange = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
     if ((area === 'sync' && changes.appConfig) || (area === 'local' && changes[SYSTEM_PROMPT_STORAGE_KEY])) {
         getStorage()
             .then(freshConfig => {
@@ -173,21 +173,23 @@ chrome.storage.onChanged.addListener((changes, area) => {
                 console.error('[AI Assistant] Failed to refresh config:', e);
             });
     }
-});
+};
 
 // Listen for messages from background script
-chrome.runtime.onMessage.addListener((message) => {
-    if (message.action === 'open_content_popup') {
-        // Always load fresh config to get latest model selection
-        getStorage().then(freshConfig => {
-            config = freshConfig;
-            openContentPopup(freshConfig, message.selection || '', message.image || null);
-        });
-    }
-});
+const handleMessage = (message: { action?: string; selection?: string; image?: string }, _sender: chrome.runtime.MessageSender, sendResponse: (response: unknown) => void) => {
+    if (message.action !== 'open_content_popup') return;
+    getStorage().then(freshConfig => {
+        config = freshConfig;
+        openContentPopup(freshConfig, message.selection || '', message.image || null);
+        sendResponse({ opened: true });
+    }).catch(error => {
+        sendResponse({ error: error instanceof Error ? error.message : String(error) });
+    });
+    return true;
+};
 
 // Hotkey Listener
-window.addEventListener('keydown', (e) => {
+const handleHotkey = (e: KeyboardEvent) => {
     if (!config) return;
 
     const eventKey = e.key.toLowerCase();
@@ -224,11 +226,13 @@ window.addEventListener('keydown', (e) => {
                         if (freshConfig.popupMode === 'content_script') {
                             openContentPopup(freshConfig, '', imageDataUrl);
                         } else {
-                            chrome.runtime.sendMessage({
+                            return chrome.runtime.sendMessage({
                                 action: 'open_with_image',
                                 image: imageDataUrl
                             });
                         }
+                    }).catch(error => {
+                        console.error('[AI Assistant] Failed to open cropped image:', error);
                     });
                 },
                 () => {
@@ -336,6 +340,29 @@ window.addEventListener('keydown', (e) => {
             }
         }
     }
-});
+};
 
-init();
+// Re-injection must replace an invalidated script without duplicating hotkeys.
+const contentGlobal = globalThis as typeof globalThis & {
+    __aiAssistantContent?: { runtime: typeof chrome.runtime; dispose: () => void };
+};
+const previous = contentGlobal.__aiAssistantContent;
+if (!previous?.runtime.id) {
+    previous?.dispose();
+    chrome.storage.onChanged.addListener(handleStorageChange);
+    chrome.runtime.onMessage.addListener(handleMessage);
+    window.addEventListener('keydown', handleHotkey);
+    contentGlobal.__aiAssistantContent = {
+        runtime: chrome.runtime,
+        dispose: () => {
+            window.removeEventListener('keydown', handleHotkey);
+            cancelCropMode();
+            forceCloseContentPopup();
+            try {
+                chrome.storage.onChanged.removeListener(handleStorageChange);
+                chrome.runtime.onMessage.removeListener(handleMessage);
+            } catch { /* The old extension context may already be invalid. */ }
+        },
+    };
+    void init();
+}

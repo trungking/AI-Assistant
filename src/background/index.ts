@@ -1,5 +1,6 @@
 import { DEFAULT_CONFIG } from '../lib/types';
 import { getStorage, setStorage } from '../lib/storage';
+import { refreshContentScripts, sendToContentScript } from './contentMessaging';
 
 /**
  * Convert an image URL to a base64 data URL.
@@ -58,6 +59,11 @@ chrome.runtime.onInstalled.addListener(async () => {
         title: "Ask AI about this image",
         contexts: ["image"]
     });
+
+    // Chrome leaves already-open tabs without a live content script on update/reload.
+    void refreshContentScripts().catch(error => {
+        console.error('[AI Assistant] Failed to refresh open tabs:', error);
+    });
 });
 
 const openUi = async () => {
@@ -98,7 +104,7 @@ const openUi = async () => {
     });
 };
 
-chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+const handleContextMenu = async (info: chrome.contextMenus.OnClickData, tab?: chrome.tabs.Tab) => {
     const appConfig = await getStorage();
     const mode = appConfig.popupMode || 'extension';
 
@@ -177,7 +183,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         }
 
         if (mode === 'content_script') {
-            chrome.tabs.sendMessage(tab.id, {
+            await sendToContentScript(tab.id, {
                 action: 'open_content_popup',
                 selection: selectedText,
                 image: null
@@ -191,7 +197,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         const imageDataUrl = await imageUrlToDataUrl(info.srcUrl);
 
         if (mode === 'content_script') {
-            chrome.tabs.sendMessage(tab.id, {
+            await sendToContentScript(tab.id, {
                 action: 'open_content_popup',
                 selection: '',
                 image: imageDataUrl
@@ -201,6 +207,12 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
             await openUi();
         }
     }
+};
+
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+    void handleContextMenu(info, tab).catch(error => {
+        console.error('[AI Assistant] Failed to open context menu popup:', error);
+    });
 });
 
 import { executeApiCall, executeFetchModels, executeApiStream } from '../lib/api';
@@ -483,7 +495,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const tabId = sender.tab?.id;
 
             if (mode === 'content_script' && tabId) {
-                chrome.tabs.sendMessage(tabId, {
+                await sendToContentScript(tabId, {
                     action: 'open_content_popup',
                     selection: '',
                     image: message.image
@@ -492,7 +504,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 await chrome.storage.local.set({ contextSelection: null, contextImage: message.image });
                 await openUi();
             }
-        })();
+        })().catch(error => {
+            console.error('[AI Assistant] Failed to open image popup:', error);
+        });
     } else if (message.type === 'PROXY_API_CALL') {
         executeApiCall(message.data.messages, message.data.config)
             .then(sendResponse)
