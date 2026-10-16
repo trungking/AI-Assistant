@@ -162,9 +162,11 @@ const init = async () => {
     }
 };
 
-// Listen for storage changes to update config dynamically
-const handleStorageChange = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
-    if ((area === 'sync' && changes.appConfig) || (area === 'local' && changes[SYSTEM_PROMPT_STORAGE_KEY])) {
+// Listen only to sync: local holds chat state with multi-MB images, and every
+// local write would be copied into this listener in every open tab.
+// Popups re-read the full config (including the local system prompt) on open.
+const handleStorageChange = (changes: Record<string, chrome.storage.StorageChange>) => {
+    if (changes.appConfig) {
         getStorage()
             .then(freshConfig => {
                 config = freshConfig;
@@ -316,7 +318,12 @@ const handleHotkey = (e: KeyboardEvent) => {
                 const selection = extractTextFromSelection();
 
                 if (config.popupMode === 'content_script') {
-                    openContentPopup(config, selection, null, prompt.content, prompt);
+                    getStorage().then(freshConfig => {
+                        config = freshConfig;
+                        openContentPopup(freshConfig, selection, null, prompt.content, prompt);
+                    }).catch(error => {
+                        console.error('[AI Assistant] Failed to open prompt popup:', error);
+                    });
                     // Note: auto-execute logic for prompt could be handled here if we passed 'immediate' flag or ID
                     // Currently ChatInterface checks props. But ContentPopup signature needs adjustment to support prompt object?
                     // openContentPopup accepts 'instruction'.
@@ -349,7 +356,7 @@ const contentGlobal = globalThis as typeof globalThis & {
 const previous = contentGlobal.__aiAssistantContent;
 if (!previous?.runtime.id) {
     previous?.dispose();
-    chrome.storage.onChanged.addListener(handleStorageChange);
+    chrome.storage.sync.onChanged.addListener(handleStorageChange);
     chrome.runtime.onMessage.addListener(handleMessage);
     window.addEventListener('keydown', handleHotkey);
     contentGlobal.__aiAssistantContent = {
@@ -359,7 +366,7 @@ if (!previous?.runtime.id) {
             cancelCropMode();
             forceCloseContentPopup();
             try {
-                chrome.storage.onChanged.removeListener(handleStorageChange);
+                chrome.storage.sync.onChanged.removeListener(handleStorageChange);
                 chrome.runtime.onMessage.removeListener(handleMessage);
             } catch { /* The old extension context may already be invalid. */ }
         },

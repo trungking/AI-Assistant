@@ -142,7 +142,9 @@ export const useChatState = ({
                 selectedImage: updated.selectedImage,
                 timestamp: Date.now()
             };
-            chrome.storage.local.set({ popupState: stateToSave });
+            chrome.storage.local.set({ popupState: stateToSave }).catch(error => {
+                console.error('[AI Assistant] Failed to save chat state:', error);
+            });
             return updated;
         });
     };

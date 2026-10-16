@@ -128,7 +128,7 @@ test('content reinjection retains one hotkey/message listener and replaces inval
     const onMessage = event(), onChanged = event(), keydown = event();
     const runtime = { id: 'extension-id', onMessage };
     const context = vm.createContext({
-        chrome: { runtime, storage: { onChanged, sync: { get: async () => ({}) }, local: { get: async () => ({}) } } },
+        chrome: { runtime, storage: { sync: { onChanged, get: async () => ({}) }, local: { get: async () => ({}) } } },
         console,
         window: { addEventListener: (name, fn) => { assert.equal(name, 'keydown'); keydown.addListener(fn); }, removeEventListener: (_, fn) => keydown.removeListener(fn) },
     });

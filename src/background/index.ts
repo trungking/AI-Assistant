@@ -254,6 +254,25 @@ const saveActiveStreamToStorage = async () => {
     });
 };
 
+const persistActiveStream = () => {
+    void saveActiveStreamToStorage().catch(error => {
+        console.error('[AI Assistant] Failed to save active stream:', error);
+    });
+};
+
+// Messages can carry multi-MB image data URLs; saving them on every chunk
+// floods storage and its onChanged listeners until the extension crashes.
+const ACTIVE_STREAM_SAVE_INTERVAL_MS = 1000;
+let activeStreamSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+const scheduleActiveStreamSave = () => {
+    if (activeStreamSaveTimer) return;
+    activeStreamSaveTimer = setTimeout(() => {
+        activeStreamSaveTimer = null;
+        persistActiveStream();
+    }, ACTIVE_STREAM_SAVE_INTERVAL_MS);
+};
+
 const clearActiveStream = async () => {
     activeStreamState = null;
     await chrome.storage.local.remove('activeStream');
@@ -297,7 +316,7 @@ chrome.runtime.onConnect.addListener((port) => {
             if (activeStreamState && activeStreamState.id === streamId) {
                 activeStreamState.port = null;
                 // Save current state so popup can reconnect
-                saveActiveStreamToStorage();
+                persistActiveStream();
             }
         });
 
@@ -317,7 +336,7 @@ chrome.runtime.onConnect.addListener((port) => {
                                 safeSend({ chunk });
                                 // Periodically save to storage when port is disconnected
                                 if (!activeStreamState.port) {
-                                    saveActiveStreamToStorage();
+                                    scheduleActiveStreamSave();
                                 }
                             }
                         },
@@ -327,7 +346,7 @@ chrome.runtime.onConnect.addListener((port) => {
                                 activeStreamState.webSearches.push(webSearch);
                                 safeSend({ webSearch });
                                 if (!activeStreamState.port) {
-                                    saveActiveStreamToStorage();
+                                    scheduleActiveStreamSave();
                                 }
                             }
                         },
@@ -336,7 +355,7 @@ chrome.runtime.onConnect.addListener((port) => {
                                 activeStreamState.accumulatedReasoning += reasoning;
                                 safeSend({ reasoning });
                                 if (!activeStreamState.port) {
-                                    saveActiveStreamToStorage();
+                                    scheduleActiveStreamSave();
                                 }
                             }
                         },
@@ -345,7 +364,7 @@ chrome.runtime.onConnect.addListener((port) => {
                                 activeStreamState.images.push(image);
                                 safeSend({ image });
                                 if (!activeStreamState.port) {
-                                    saveActiveStreamToStorage();
+                                    scheduleActiveStreamSave();
                                 }
                             }
                         }
@@ -424,7 +443,7 @@ chrome.runtime.onConnect.addListener((port) => {
             port.onDisconnect.addListener(() => {
                 if (activeStreamState) {
                     activeStreamState.port = null;
-                    saveActiveStreamToStorage();
+                    persistActiveStream();
                 }
             });
         } else {
