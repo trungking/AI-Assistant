@@ -1,4 +1,4 @@
-import type { AppConfig, ChatMessage } from './types';
+import { DEFAULT_CONFIG, type AppConfig, type ChatMessage } from './types';
 import { callChromeNano, CHROME_PROVIDER } from './chromeNano';
 
 interface ApiResponse {
@@ -989,9 +989,86 @@ const selectRandomKey = async (allKeys: string[], provider: string): Promise<{ k
   return { key: available[Math.floor(Math.random() * available.length)], available };
 };
 
-export const executeApiCall = async (
-  messages: ChatMessage[],
-  config: AppConfig
+// --- Timeout & retry ---
+
+const DEFAULT_REQUEST_TIMEOUT_SECONDS = DEFAULT_CONFIG.requestTimeoutSeconds ?? 30;
+const DEFAULT_MAX_RETRIES = DEFAULT_CONFIG.maxRetries ?? 2;
+const MAX_RETRIES_LIMIT = 5;
+const RETRY_BASE_DELAY_MS = 1000;
+
+const getRequestTimeoutMs = (config: AppConfig): number => {
+  const seconds = Number(config.requestTimeoutSeconds ?? DEFAULT_REQUEST_TIMEOUT_SECONDS);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0;
+};
+
+const getMaxRetries = (config: AppConfig): number => {
+  const retries = Math.floor(Number(config.maxRetries ?? DEFAULT_MAX_RETRIES));
+  return Number.isFinite(retries) ? Math.min(Math.max(retries, 0), MAX_RETRIES_LIMIT) : DEFAULT_MAX_RETRIES;
+};
+
+// readStream reports received bytes here so the idle timeout only fires when
+// the server has gone quiet, not while a long answer is still streaming.
+const streamActivityListeners = new WeakMap<AbortSignal, () => void>();
+
+const reportStreamActivity = (signal?: AbortSignal) => {
+  if (signal) streamActivityListeners.get(signal)?.();
+};
+
+// Transient failures worth another attempt: network errors, timeouts, 408/425/429/5xx,
+// mid-stream error events and streams that were cut off.
+const isRetryableError = (e: any): boolean => {
+  if (e instanceof ApiError) {
+    return e.status === 408 || e.status === 425 || e.status === 429 || e.status >= 500;
+  }
+  return true;
+};
+
+const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
+  if (signal?.aborted) {
+    reject(new DOMException('Aborted', 'AbortError'));
+    return;
+  }
+  const timer = setTimeout(() => {
+    signal?.removeEventListener('abort', onAbort);
+    resolve();
+  }, ms);
+  const onAbort = () => {
+    clearTimeout(timer);
+    reject(new DOMException('Aborted', 'AbortError'));
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
+});
+
+/** Sent to the UI before each retry so it can show what's happening. */
+export type RetryStatus = {
+  attempt: number; // 1-based retry number
+  maxRetries: number;
+  error: string; // why the previous attempt failed
+};
+
+type AttemptContext = {
+  apiKey: string;
+  signal: AbortSignal;
+  // Marks activity so the idle timeout restarts
+  touch: () => void;
+};
+
+type AttemptOutcome = {
+  result: ApiResponse;
+  retryable: boolean;
+};
+
+/**
+ * Run `attempt` with a fresh key, an idle timeout and up to `maxRetries` retries.
+ * `canRetry` lets streaming callers refuse a retry once output reached the UI,
+ * since a second attempt would duplicate it.
+ */
+const runWithRetry = async (
+  config: AppConfig,
+  signal: AbortSignal | undefined,
+  attempt: (ctx: AttemptContext) => Promise<ApiResponse>,
+  canRetry: () => boolean = () => true,
+  onRetry?: (status: RetryStatus) => void
 ): Promise<ApiResponse> => {
   const provider = config.selectedProvider;
   const apiKeys = config.apiKeys[provider];
@@ -1000,55 +1077,108 @@ export const executeApiCall = async (
     return { text: '', error: `No API key found for ${provider}` };
   }
 
-  // Select a random available API key (avoiding exhausted ones)
-  const keySelection = await selectRandomKey(apiKeys, provider);
-  if (!keySelection) {
-    return { text: '', error: `No available API keys for ${provider}. All keys may have exhausted quota.` };
+  const timeoutMs = getRequestTimeoutMs(config);
+  const maxRetries = getMaxRetries(config);
+
+  const runOnce = async (): Promise<AttemptOutcome> => {
+    // Select a random available API key (avoiding exhausted ones). Re-selected on
+    // every attempt so a rate-limited key is skipped on retry.
+    const keySelection = await selectRandomKey(apiKeys, provider);
+    if (!keySelection) {
+      return { result: { text: '', error: `No available API keys for ${provider}. All keys may have exhausted quota.` }, retryable: false };
+    }
+    const apiKey = keySelection.key;
+
+    const controller = new AbortController();
+    const onOuterAbort = () => controller.abort();
+    signal?.addEventListener('abort', onOuterAbort, { once: true });
+
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const touch = () => {
+      if (!timeoutMs) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
+    };
+    streamActivityListeners.set(controller.signal, touch);
+    touch();
+
+    // A key marked exhausted means another key may succeed
+    const markIfExhausted = async (message: string, status?: number): Promise<boolean> => {
+      const expiry = getKeyExhaustionExpiry(message, status);
+      if (!expiry) return false;
+      await markKeyExhausted(apiKey, provider, expiry);
+      return keySelection.available.length > 1;
+    };
+
+    try {
+      const result = await attempt({ apiKey, signal: controller.signal, touch });
+      if (!result.error) {
+        return { result, retryable: false };
+      }
+      const switchedKey = await markIfExhausted(result.error);
+      return { result, retryable: result.error === STREAM_INTERRUPTED_ERROR || switchedKey };
+    } catch (e: any) {
+      if (signal?.aborted) throw e;
+      if (timedOut) {
+        return {
+          result: { text: '', error: `No response from the server for ${timeoutMs / 1000}s.` },
+          retryable: true
+        };
+      }
+      if (e?.name === 'AbortError') throw e;
+      const errorMsg = e?.message || 'Request failed';
+      const switchedKey = await markIfExhausted(errorMsg, e instanceof ApiError ? e.status : undefined);
+      return { result: { text: '', error: errorMsg }, retryable: switchedKey || isRetryableError(e) };
+    } finally {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onOuterAbort);
+    }
+  };
+
+  let outcome = await runOnce();
+  for (let retry = 1; retry <= maxRetries && outcome.retryable && canRetry(); retry++) {
+    const error = outcome.result.error || 'Request failed';
+    console.warn(`[AI Assistant] Request failed (${error}), retrying ${retry}/${maxRetries}`);
+    onRetry?.({ attempt: retry, maxRetries, error });
+    await sleep(RETRY_BASE_DELAY_MS * retry, signal);
+    outcome = await runOnce();
   }
 
-  const apiKey = keySelection.key;
+  if (outcome.result.error && outcome.retryable && maxRetries > 0 && canRetry()) {
+    return { ...outcome.result, error: `${outcome.result.error} (after ${maxRetries + 1} attempts)` };
+  }
+  return outcome.result;
+};
+
+export const executeApiCall = async (
+  messages: ChatMessage[],
+  config: AppConfig
+): Promise<ApiResponse> => {
+  const provider = config.selectedProvider;
   const baseUrl = config.customBaseUrls[provider] || getDefaultBaseUrl(provider);
   const model = config.selectedModel[provider];
   const messagesWithSystem = injectSystemPrompt(messages, config);
 
-  try {
-    let result: ApiResponse;
+  return runWithRetry(config, undefined, ({ apiKey, signal }) => {
     switch (provider) {
       case 'google':
-        result = await callGoogle(apiKey, baseUrl, model, messagesWithSystem);
-        break;
+        return callGoogle(apiKey, baseUrl, model, messagesWithSystem, signal);
       case 'openai':
-        result = await callOpenAI(apiKey, baseUrl, model, messagesWithSystem);
-        break;
+        return callOpenAI(apiKey, baseUrl, model, messagesWithSystem, signal);
       case 'anthropic':
-        result = await callAnthropic(apiKey, baseUrl, model, messagesWithSystem);
-        break;
+        return callAnthropic(apiKey, baseUrl, model, messagesWithSystem, signal);
       case 'openrouter':
-        result = await callOpenRouter(apiKey, baseUrl, model, messagesWithSystem);
-        break;
+        return callOpenRouter(apiKey, baseUrl, model, messagesWithSystem, signal);
       case 'perplexity':
-        result = await callPerplexity(apiKey, baseUrl, model, messagesWithSystem);
-        break;
+        return callPerplexity(apiKey, baseUrl, model, messagesWithSystem, signal);
       default:
-        result = await callOpenAI(apiKey, baseUrl, model, messagesWithSystem);
+        return callOpenAI(apiKey, baseUrl, model, messagesWithSystem, signal);
     }
-
-    // Check if response indicates quota exhaustion
-    const resultExpiry = result.error ? getKeyExhaustionExpiry(result.error) : null;
-    if (resultExpiry) {
-      await markKeyExhausted(apiKey, provider, resultExpiry);
-    }
-
-    return result;
-  } catch (e: any) {
-    const errorMsg = e.message || 'API call failed';
-    // Check if error indicates quota exhaustion
-    const errorExpiry = getKeyExhaustionExpiry(errorMsg, e instanceof ApiError ? e.status : undefined);
-    if (errorExpiry) {
-      await markKeyExhausted(apiKey, provider, errorExpiry);
-    }
-    return { text: '', error: errorMsg };
-  }
+  });
 };
 
 export const executeApiStream = async (
@@ -1058,63 +1188,37 @@ export const executeApiStream = async (
   signal?: AbortSignal,
   onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void,
   onReasoning?: (text: string) => void,
-  onImage?: (imageUrl: string) => void
+  onImage?: (imageUrl: string) => void,
+  onRetry?: (status: RetryStatus) => void
 ): Promise<ApiResponse> => {
   const provider = config.selectedProvider;
-  const apiKeys = config.apiKeys[provider];
-
-  if (!apiKeys || apiKeys.length === 0) {
-    return { text: '', error: `No API key found for ${provider}` };
-  }
-
-  // Select a random available API key (avoiding exhausted ones)
-  const keySelection = await selectRandomKey(apiKeys, provider);
-  if (!keySelection) {
-    return { text: '', error: `No available API keys for ${provider}. All keys may have exhausted quota.` };
-  }
-
-  const apiKey = keySelection.key;
   const baseUrl = config.customBaseUrls[provider] || getDefaultBaseUrl(provider);
   const model = config.selectedModel[provider];
   const messagesWithSystem = injectSystemPrompt(messages, config);
 
-  try {
-    let result: ApiResponse;
+  // Once anything reached the UI a retry would duplicate it, so only retry before that
+  let emitted = false;
+
+  return runWithRetry(config, signal, ({ apiKey, signal: attemptSignal, touch }) => {
+    const chunk = (text: string) => { emitted = true; touch(); onChunk(text); };
+    const webSearch = onWebSearch && ((status: Parameters<typeof onWebSearch>[0]) => { emitted = true; touch(); onWebSearch(status); });
+    const reasoning = onReasoning && ((text: string) => { emitted = true; touch(); onReasoning(text); });
+    const image = onImage && ((url: string) => { emitted = true; touch(); onImage(url); });
+
     switch (provider) {
       case 'google':
-        result = await streamGoogle(apiKey, baseUrl, model, messagesWithSystem, onChunk, signal, config, onWebSearch, onReasoning, onImage);
-        break;
+        return streamGoogle(apiKey, baseUrl, model, messagesWithSystem, chunk, attemptSignal, config, webSearch, reasoning, image);
       case 'openai':
       case 'openrouter':
-        result = await streamOpenAI(apiKey, baseUrl, model, messagesWithSystem, onChunk, provider === 'openrouter', signal, config, onWebSearch, onReasoning, onImage);
-        break;
+        return streamOpenAI(apiKey, baseUrl, model, messagesWithSystem, chunk, provider === 'openrouter', attemptSignal, config, webSearch, reasoning, image);
       case 'anthropic':
-        result = await streamAnthropic(apiKey, baseUrl, model, messagesWithSystem, onChunk, signal, config, onReasoning);
-        break;
+        return streamAnthropic(apiKey, baseUrl, model, messagesWithSystem, chunk, attemptSignal, config, reasoning);
       case 'perplexity':
-        result = await streamPerplexity(apiKey, baseUrl, model, messagesWithSystem, onChunk, signal, onReasoning);
-        break;
+        return streamPerplexity(apiKey, baseUrl, model, messagesWithSystem, chunk, attemptSignal, reasoning);
       default:
-        result = await streamOpenAI(apiKey, baseUrl, model, messagesWithSystem, onChunk, false, signal, config, onWebSearch, onReasoning, onImage);
+        return streamOpenAI(apiKey, baseUrl, model, messagesWithSystem, chunk, false, attemptSignal, config, webSearch, reasoning, image);
     }
-
-    // Check if response indicates quota exhaustion
-    const resultExpiry = result.error ? getKeyExhaustionExpiry(result.error) : null;
-    if (resultExpiry) {
-      await markKeyExhausted(apiKey, provider, resultExpiry);
-    }
-
-    return result;
-  } catch (e: any) {
-    if (e.name === 'AbortError') throw e;
-    const errorMsg = e.message || 'Stream failed';
-    // Check if error indicates quota exhaustion
-    const errorExpiry = getKeyExhaustionExpiry(errorMsg, e instanceof ApiError ? e.status : undefined);
-    if (errorExpiry) {
-      await markKeyExhausted(apiKey, provider, errorExpiry);
-    }
-    return { text: '', error: errorMsg };
-  }
+  }, () => !emitted, onRetry);
 };
 
 export const callApi = async (
@@ -1124,7 +1228,8 @@ export const callApi = async (
   signal?: AbortSignal,
   onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void,
   onReasoning?: (text: string) => void,
-  onImage?: (imageUrl: string) => void
+  onImage?: (imageUrl: string) => void,
+  onRetry?: (status: RetryStatus) => void
 ): Promise<ApiResponse> => {
   if (config.selectedProvider === CHROME_PROVIDER) {
     return callChromeNano(injectSystemPrompt(messages, config), onChunk, signal);
@@ -1133,7 +1238,7 @@ export const callApi = async (
   // Both content scripts and extension pages stream through the background so
   // the request can continue when the popup closes.
   if (onChunk) {
-    return streamViaBackground(messages, config, onChunk, signal, onWebSearch, onReasoning, onImage);
+    return streamViaBackground(messages, config, onChunk, signal, onWebSearch, onReasoning, onImage, onRetry);
   }
 
   if (window.location.protocol.startsWith('http')) {
@@ -1153,7 +1258,8 @@ const streamViaBackground = (
   signal?: AbortSignal,
   onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void,
   onReasoning?: (text: string) => void,
-  onImage?: (imageUrl: string) => void
+  onImage?: (imageUrl: string) => void,
+  onRetry?: (status: RetryStatus) => void
 ): Promise<ApiResponse> => {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -1209,6 +1315,8 @@ const streamViaBackground = (
         onReasoning(msg.reasoning);
       } else if (msg.webSearch && onWebSearch) {
         onWebSearch(msg.webSearch);
+      } else if (msg.retry && onRetry) {
+        onRetry(msg.retry);
       } else if (msg.image && onImage) {
         onImage(msg.image);
       }
@@ -1288,7 +1396,7 @@ const getDefaultBaseUrl = (provider: string) => {
   }
 }
 
-const callGoogle = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[]): Promise<ApiResponse> => {
+const callGoogle = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], signal?: AbortSignal): Promise<ApiResponse> => {
   const url = `${baseUrl}/models/${model}:generateContent?key=${apiKey}`;
 
   // Separate system messages from conversation messages
@@ -1324,6 +1432,7 @@ const callGoogle = async (apiKey: string, baseUrl: string, model: string, messag
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal,
     body: JSON.stringify(requestBody)
   });
 
@@ -1338,9 +1447,9 @@ const callGoogle = async (apiKey: string, baseUrl: string, model: string, messag
   return { text: stripThinkingTags(text) };
 };
 
-const callOpenAI = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[]): Promise<ApiResponse> => {
+const callOpenAI = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], signal?: AbortSignal): Promise<ApiResponse> => {
   if (shouldUseImageGenerationsEndpoint(model)) {
-    return callOpenAIImageGeneration(apiKey, baseUrl, model, messages);
+    return callOpenAIImageGeneration(apiKey, baseUrl, model, messages, signal);
   }
 
   const url = `${baseUrl}/chat/completions`;
@@ -1364,6 +1473,7 @@ const callOpenAI = async (apiKey: string, baseUrl: string, model: string, messag
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`
     },
+    signal,
     body: JSON.stringify({
       model: model,
       messages: msgs
@@ -1378,7 +1488,7 @@ const callOpenAI = async (apiKey: string, baseUrl: string, model: string, messag
   return { text: stripThinkingTags(data.choices?.[0]?.message?.content || data.choices?.[0]?.text || '') };
 };
 
-const callAnthropic = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[]): Promise<ApiResponse> => {
+const callAnthropic = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], signal?: AbortSignal): Promise<ApiResponse> => {
   const url = `${baseUrl}/messages`;
 
   // Sanitize messages to remove UI-only fields and filter empty messages
@@ -1417,6 +1527,7 @@ const callAnthropic = async (apiKey: string, baseUrl: string, model: string, mes
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01'
     },
+    signal,
     body: JSON.stringify(body)
   });
 
@@ -1428,7 +1539,7 @@ const callAnthropic = async (apiKey: string, baseUrl: string, model: string, mes
   return { text: stripThinkingTags(data.content?.[0]?.text || '') };
 };
 
-const callOpenRouter = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[]): Promise<ApiResponse> => {
+const callOpenRouter = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], signal?: AbortSignal): Promise<ApiResponse> => {
   // OpenRouter is OpenAI compatible
   const url = `${baseUrl}/chat/completions`;
 
@@ -1457,6 +1568,7 @@ const callOpenRouter = async (apiKey: string, baseUrl: string, model: string, me
       'HTTP-Referer': 'https://github.com/your/repo',
       'X-Title': 'AI Ask Extension',
     },
+    signal,
     body: JSON.stringify({
       model: model,
       messages: msgs
@@ -1472,7 +1584,7 @@ const callOpenRouter = async (apiKey: string, baseUrl: string, model: string, me
 }
 
 // Perplexity API (OpenAI compatible with web search capabilities)
-const callPerplexity = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[]): Promise<ApiResponse> => {
+const callPerplexity = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[], signal?: AbortSignal): Promise<ApiResponse> => {
   const url = `${baseUrl}/chat/completions`;
 
   // Sanitize messages to remove UI-only fields and filter empty messages
@@ -1497,6 +1609,7 @@ const callPerplexity = async (apiKey: string, baseUrl: string, model: string, me
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
     },
+    signal,
     body: JSON.stringify({
       model: model,
       messages: msgs,
@@ -1537,46 +1650,48 @@ const throwIfStreamError = (line: string) => {
   throw new Error(message);
 };
 
-const readStream = async (response: Response, onChunk: (text: string) => void, parser: (chunk: string) => string | null) => {
+const readStream = async (response: Response, signal: AbortSignal | undefined, onChunk: (text: string) => void, parser: (chunk: string) => string | null) => {
   const reader = response.body?.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
 
   if (!reader) throw new Error('Response body is unavailable');
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  // Make sure a pending read ends on abort (e.g. the idle timeout) even if the
+  // body isn't tied to the fetch signal
+  const onAbort = () => { reader.cancel().catch(() => { }); };
+  signal?.addEventListener('abort', onAbort, { once: true });
 
-    buffer += decoder.decode(value, { stream: true });
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      reportStreamActivity(signal);
 
-    // Process buffer lines
-    // We split by newlines but keep the buffer if it doesn't end with one to handle split packets
-    // However, generic logic:
+      buffer += decoder.decode(value, { stream: true });
 
-    // Strategy: Process one valid unit at a time.
-    // For SSE, usually split by \n\n or \n.
-    // For Google JSON array, it's tricker.
+      // SSE is line based: process complete lines and keep the last partial
+      // line in the buffer for the next packet
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
 
-    // Let's implement provider-specific buffering in the parser or just pass raw chunk?
-    // Better: pass raw chunk to parser or handle buffering here.
-    // For simplicity for now: assume parser handles string chunks or we do simple line splitting.
-    // SSE is based on lines.
-
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || ''; // Keep the last partial line
-
-    for (const line of lines) {
-      try {
-        throwIfStreamError(line);
-      } catch (e) {
-        reader.cancel().catch(() => { });
-        throw e;
+      for (const line of lines) {
+        try {
+          throwIfStreamError(line);
+        } catch (e) {
+          reader.cancel().catch(() => { });
+          throw e;
+        }
+        const parsed = parser(line);
+        if (parsed) onChunk(parsed);
       }
-      const parsed = parser(line);
-      if (parsed) onChunk(parsed);
     }
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
   }
+
+  // A cancelled reader reports done; don't treat that as a finished stream
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
   // Process remaining buffer
   if (buffer) {
@@ -1742,7 +1857,7 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
     }
   } else {
     let streamFinished = false;
-    await readStream(response, (text) => {
+    await readStream(response, signal, (text) => {
       taggedContent.write(text);
     }, (line) => {
       const trim = line.trim();
@@ -2024,7 +2139,7 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
             }
           } else {
             let followUpFinished = false;
-            await readStream(followUpResponse, (text) => {
+            await readStream(followUpResponse, signal, (text) => {
               followUpTaggedContent.write(text);
             }, (line) => {
               const trim = line.trim();
@@ -2179,7 +2294,7 @@ const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, m
   } else {
     let streamFinished = false;
     let hitMaxTokens = false;
-    await readStream(response, (text) => {
+    await readStream(response, signal, (text) => {
       taggedContent.write(text);
     }, (line) => {
       const trim = line.trim();
@@ -2272,7 +2387,7 @@ const streamPerplexity = async (apiKey: string, baseUrl: string, model: string, 
     }
   } else {
     let streamFinished = false;
-    await readStream(response, (text) => {
+    await readStream(response, signal, (text) => {
       taggedContent.write(text);
     }, (line) => {
       const trim = line.trim();
@@ -2417,7 +2532,7 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
     // SSE format (alt=sse): each event is "data: {json}\n\n"
     let streamFinished = false;
     let blockReason: string | null = null;
-    await readStream(response, (_text) => {
+    await readStream(response, signal, (_text) => {
       // onChunk is called inside processGeminiResponse
     }, (line) => {
       const trim = line.trim();
@@ -2467,6 +2582,7 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      reportStreamActivity(signal);
       buffer += decoder.decode(value, { stream: true });
 
       let braceCount = 0;

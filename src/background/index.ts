@@ -222,7 +222,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     });
 });
 
-import { executeApiCall, executeFetchModels, executeApiStream } from '../lib/api';
+import { executeApiCall, executeFetchModels, executeApiStream, type RetryStatus } from '../lib/api';
 
 // --- Background Stream Continuation ---
 type StreamState = {
@@ -239,6 +239,7 @@ type StreamState = {
     startTime: number;
     lastActivity: number;
     idleTimedOut: boolean;
+    retry: RetryStatus | null; // Latest retry notice, until output arrives
 };
 
 // Keeps track of the latest background stream so it can survive popup disconnects
@@ -348,6 +349,7 @@ chrome.runtime.onConnect.addListener((port) => {
             startTime: Date.now(),
             lastActivity: Date.now(),
             idleTimedOut: false,
+            retry: null,
         };
         activeStreamState = state;
 
@@ -366,6 +368,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
         const onProgress = () => {
             state.lastActivity = Date.now();
+            state.retry = null;
             // Periodically save to storage when port is disconnected
             if (!state.port && isActive()) {
                 scheduleActiveStreamSave();
@@ -431,6 +434,11 @@ chrome.runtime.onConnect.addListener((port) => {
                             state.images.push(image);
                             safeSend({ image });
                             onProgress();
+                        },
+                        (retry) => {
+                            state.lastActivity = Date.now();
+                            state.retry = retry;
+                            safeSend({ retry });
                         }
                     );
 
@@ -478,6 +486,9 @@ chrome.runtime.onConnect.addListener((port) => {
                 }
                 for (const img of target.images) {
                     port.postMessage({ image: img });
+                }
+                if (target.retry && !target.done) {
+                    port.postMessage({ retry: target.retry });
                 }
 
                 if (target.done) {

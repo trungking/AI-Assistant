@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { type AppConfig, type ChatMessage, type PromptTemplate, type Provider } from '../lib/types';
-import { callApi, fetchModels } from '../lib/api';
+import { callApi, fetchModels, type RetryStatus } from '../lib/api';
 import { Send, Settings, Sparkles, Loader2, User, Bot, Trash2, Zap, Image as ImageIcon, ChevronDown, ChevronRight, Check, X, Copy, PauseCircle, SquarePen, Clock, Globe, Link2, ExternalLink, Square, RefreshCw, Download, RotateCcw } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import type { PluggableList } from 'unified';
@@ -239,6 +239,12 @@ export default function ChatInterface({
     const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
+    // Shown in place of "Thinking..." while a failed request is being retried
+    const [retryStatus, setRetryStatus] = useState<RetryStatus | null>(null);
+
+    useEffect(() => {
+        if (!loading) setRetryStatus(null);
+    }, [loading]);
     const [availableModels, setAvailableModels] = useState<Record<string, string[]>>({});
     const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
     const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
@@ -468,6 +474,14 @@ export default function ChatInterface({
                         setMessages(savedMessages);
                         chrome.storage.local.remove('activeStream');
                         return;
+                    }
+
+                    if (msg.retry) {
+                        setRetryStatus(msg.retry as RetryStatus);
+                        return;
+                    }
+                    if (msg.chunk || msg.reasoning || msg.webSearch || msg.image) {
+                        setRetryStatus(null);
                     }
 
                     if (msg.reconnected) {
@@ -822,6 +836,7 @@ export default function ChatInterface({
         };
 
         const onChunk = (chunk: string) => {
+            setRetryStatus(null);
             // Finalize reasoning timer on first content chunk
             finalizeReasoningTimer();
             accumulatedText += chunk;
@@ -905,7 +920,17 @@ export default function ChatInterface({
                 : { interrupted: true, responseTime }));
         };
 
-        return { onChunk, onWebSearch, onReasoning, onImage, reset, markInterrupted };
+        const onRetry = (status: RetryStatus) => setRetryStatus(status);
+
+        return {
+            onChunk,
+            onWebSearch: (status: WebSearchStatus) => { setRetryStatus(null); onWebSearch(status); },
+            onReasoning: (chunk: string) => { setRetryStatus(null); onReasoning(chunk); },
+            onImage: (url: string) => { setRetryStatus(null); onImage(url); },
+            onRetry,
+            reset,
+            markInterrupted
+        };
     };
 
     const scrollToBottom = () => {
@@ -1083,7 +1108,7 @@ export default function ChatInterface({
 
         try {
             const res = await callApi(newMessages, tempConfig, handlers.onChunk, controller.signal,
-                handlers.onWebSearch, handlers.onReasoning, handlers.onImage);
+                handlers.onWebSearch, handlers.onReasoning, handlers.onImage, handlers.onRetry);
 
             if (res.error && isCurrent()) {
                 setError(res.error);
@@ -1192,7 +1217,7 @@ export default function ChatInterface({
 
         const handlers = createStreamHandlers(newMessages.length, startTime);
         const runRequest = (requestConfig: AppConfig) => callApi(newMessages, requestConfig, handlers.onChunk, controller.signal,
-            handlers.onWebSearch, handlers.onReasoning, handlers.onImage);
+            handlers.onWebSearch, handlers.onReasoning, handlers.onImage, handlers.onRetry);
 
         try {
             let res = await runRequest(activeConfig);
@@ -1636,8 +1661,15 @@ export default function ChatInterface({
                                     ) : !msg.content && loading && idx === messages.length - 1 && !msg.reasoning ? (
                                         // Empty message at the end while loading (and no reasoning) - show Thinking
                                         <div className="flex items-center gap-2 text-slate-500 dark:text-gpt-secondary py-1">
-                                            <Loader2 size={14} className="animate-spin" />
-                                            <span className="text-xs font-medium">Thinking...</span>
+                                            <Loader2 size={14} className="animate-spin shrink-0" />
+                                            {retryStatus ? (
+                                                <span className="text-xs font-medium min-w-0 line-clamp-2 break-words" title={retryStatus.error}>
+                                                    Retrying ({retryStatus.attempt}/{retryStatus.maxRetries})
+                                                    <span className="font-normal text-slate-400 dark:text-zinc-500"> · {retryStatus.error}</span>
+                                                </span>
+                                            ) : (
+                                                <span className="text-xs font-medium">Thinking...</span>
+                                            )}
                                         </div>
                                     ) : (
                                         <ReactMarkdown

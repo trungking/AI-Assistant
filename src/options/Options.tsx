@@ -687,6 +687,46 @@ export default function Options() {
                         <div className="bg-white dark:bg-gpt-sidebar rounded-2xl shadow-sm border border-slate-200 dark:border-gpt-hover p-6">
                             <h3 className="text-base font-bold text-slate-900 dark:text-gpt-text mb-4 flex items-center gap-2">
                                 <div className="w-1 h-5 bg-blue-600 rounded-full"></div>
+                                Requests
+                            </h3>
+                            <div className="max-w-md grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-xs font-semibold text-slate-500 dark:text-gpt-secondary mb-1.5 uppercase tracking-wider">Timeout (seconds)</label>
+                                    <input
+                                        type="number"
+                                        min={0}
+                                        step={10}
+                                        value={config.requestTimeoutSeconds ?? DEFAULT_CONFIG.requestTimeoutSeconds}
+                                        onChange={(e) => {
+                                            const value = parseInt(e.target.value, 10);
+                                            saveConfig({ ...config, requestTimeoutSeconds: Number.isNaN(value) ? 0 : Math.max(0, value) });
+                                        }}
+                                        className="w-full p-3 bg-slate-50 dark:bg-gpt-input border border-slate-200 dark:border-gpt-hover rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all font-medium text-slate-700 dark:text-gpt-text"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-semibold text-slate-500 dark:text-gpt-secondary mb-1.5 uppercase tracking-wider">Retries</label>
+                                    <input
+                                        type="number"
+                                        min={0}
+                                        max={5}
+                                        value={config.maxRetries ?? DEFAULT_CONFIG.maxRetries}
+                                        onChange={(e) => {
+                                            const value = parseInt(e.target.value, 10);
+                                            saveConfig({ ...config, maxRetries: Number.isNaN(value) ? 0 : Math.min(Math.max(value, 0), 5) });
+                                        }}
+                                        className="w-full p-3 bg-slate-50 dark:bg-gpt-input border border-slate-200 dark:border-gpt-hover rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all font-medium text-slate-700 dark:text-gpt-text"
+                                    />
+                                </div>
+                                <p className="col-span-2 text-xs text-slate-400 dark:text-gpt-secondary">
+                                    A request is stopped when the server sends nothing for the timeout period (0 = no timeout). Network errors, timeouts, rate limits and server errors are retried, but only before any part of the answer is shown.
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="bg-white dark:bg-gpt-sidebar rounded-2xl shadow-sm border border-slate-200 dark:border-gpt-hover p-6">
+                            <h3 className="text-base font-bold text-slate-900 dark:text-gpt-text mb-4 flex items-center gap-2">
+                                <div className="w-1 h-5 bg-blue-600 rounded-full"></div>
                                 Web Search
                             </h3>
                             <div className="max-w-md space-y-4">

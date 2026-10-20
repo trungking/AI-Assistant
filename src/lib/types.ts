@@ -78,6 +78,8 @@ export interface AppConfig {
   visionModel?: { provider: string; model: string } | null; // Fallback model for vision/image requests
   defaultModel?: { provider: string; model: string } | null; // Default model that the model selector resets to
   systemPrompt?: string; // Custom system prompt for all conversations
+  requestTimeoutSeconds?: number; // Abort a request after this many seconds without data (0 = never)
+  maxRetries?: number; // Retries for failed requests before any output is shown
 }
 
 export const DEFAULT_PROMPTS: PromptTemplate[] = [
@@ -125,5 +127,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   backupModels: {},
   visionModel: null,
   defaultModel: null,
-  systemPrompt: 'You are a helpful assistant.\n\nToday\'s date is ${date}.'
+  systemPrompt: 'You are a helpful assistant.\n\nToday\'s date is ${date}.',
+  requestTimeoutSeconds: 30,
+  maxRetries: 2
 };
