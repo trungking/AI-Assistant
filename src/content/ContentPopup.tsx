@@ -2,7 +2,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import UnifiedPopup from '../components/UnifiedPopup';
 import type { AppConfig, PromptTemplate } from '../lib/types';
 import { matchesHotkey } from '../lib/hotkeys';
-import styleText from '../index.css?inline';
+import { getShadowCss, ensureKatexFontsInDocument } from './shadowStyles';
 
 let root: Root | null = null;
 let shadowContainer: HTMLElement | null = null;
@@ -72,11 +72,12 @@ export const openContentPopup = (
     // Create container
     shadowContainer = document.createElement('div');
     shadowContainer.id = 'ai-ask-content-popup-host';
+    // `all` must come first: the shorthand resets every other property set before it.
+    shadowContainer.style.all = 'initial';
     shadowContainer.style.position = 'absolute';
     shadowContainer.style.zIndex = '2147483647';
     shadowContainer.style.left = '0';
     shadowContainer.style.top = '0';
-    shadowContainer.style.all = 'initial';
 
     // Stop keyboard events from propagating to the parent page
     // Use bubble phase (false) so React handlers can process events first
@@ -101,8 +102,10 @@ export const openContentPopup = (
 
     // Inject styles
     const style = document.createElement('style');
-    style.textContent = styleText;
+    style.textContent = getShadowCss();
     shadow.appendChild(style);
+    // @font-face is ignored inside shadow roots, so KaTeX fonts live in the page.
+    ensureKatexFontsInDocument();
 
     // Calculate initial position
     const { x: initialX, y: initialY } = calculatePopupPosition(config);

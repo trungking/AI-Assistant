@@ -7,6 +7,36 @@ interface ApiResponse {
   images?: string[];
 }
 
+class ApiError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+// Extract a readable message from an error response. Bodies may be JSON in
+// several shapes (OpenAI/Anthropic/Gemini/Brave) or HTML from a proxy.
+const readErrorMessage = async (response: Response): Promise<string> => {
+  const body = await response.text().catch(() => '');
+  let message = '';
+  try {
+    let json = JSON.parse(body);
+    if (Array.isArray(json)) json = json[0];
+    const err = json?.error ?? json;
+    message = typeof err === 'string'
+      ? err
+      : err?.message || err?.detail || json?.message || json?.detail || '';
+  } catch { /* not JSON */ }
+  return message || body.trim().slice(0, 500) || response.statusText || `HTTP ${response.status}`;
+};
+
+const throwApiError = async (response: Response): Promise<never> => {
+  throw new ApiError(await readErrorMessage(response), response.status);
+};
+
 type ThinkingTag = {
   open: string;
   close: string;
@@ -70,9 +100,14 @@ const createThinkingTagExtractor = (
   const openTags = THINKING_TAGS.map(tag => tag.open);
   let buffer = '';
   let activeTag: ThinkingTag | null = null;
+  // Thinking blocks only appear before the answer. Once real content has been
+  // emitted, a literal "<think>" (e.g. in an explanation of XML) is just text.
+  let contentStarted = false;
 
   const emitContent = (text: string) => {
-    if (text) onContent(text);
+    if (!text) return;
+    if (text.trim()) contentStarted = true;
+    onContent(text);
   };
 
   const emitReasoning = (text: string) => {
@@ -82,7 +117,19 @@ const createThinkingTagExtractor = (
   const processBuffer = (isFinal = false) => {
     while (buffer) {
       if (!activeTag) {
+        if (contentStarted) {
+          emitContent(buffer);
+          buffer = '';
+          break;
+        }
+
         const nextOpen = findFirstToken(buffer, openTags);
+        if (nextOpen && buffer.slice(0, nextOpen.index).trim()) {
+          // Text precedes the tag, so this is part of the answer
+          emitContent(buffer);
+          buffer = '';
+          break;
+        }
         if (!nextOpen) {
           const keepLength = isFinal ? 0 : getPartialTokenSuffixLength(buffer, openTags);
           const emitLength = buffer.length - keepLength;
@@ -191,6 +238,26 @@ const WEB_SEARCH_TOOL = {
   }
 };
 
+// Merge streamed tool-call deltas into calls. Some OpenAI-compatible servers
+// omit `index`; treat those as continuing the last call (or starting the first).
+const accumulateToolCallDeltas = (toolCalls: any[], deltas: any[]) => {
+  for (const tc of deltas) {
+    let index: number = typeof tc.index === 'number' ? tc.index : -1;
+    if (index < 0) {
+      const last = toolCalls[toolCalls.length - 1];
+      index = tc.id && last?.id && last.id !== tc.id
+        ? toolCalls.length
+        : Math.max(toolCalls.length - 1, 0);
+    }
+    if (!toolCalls[index]) {
+      toolCalls[index] = { id: '', type: 'function', function: { name: '', arguments: '' } };
+    }
+    if (tc.id) toolCalls[index].id = tc.id;
+    if (tc.function?.name) toolCalls[index].function.name = tc.function.name;
+    if (tc.function?.arguments) toolCalls[index].function.arguments += tc.function.arguments;
+  }
+};
+
 // Google Search Tool Definition (Gemini native format)
 const GOOGLE_SEARCH_TOOL = {
   google_search: {}
@@ -206,6 +273,12 @@ const GROK_SEARCH_TOOLS = [
   { type: 'web_search' as const },
   { type: 'x_search' as const }
 ];
+
+// Text part to send next to an image. Image-only messages have empty text,
+// which Anthropic and others reject as an empty content block.
+const imageMessageTextPart = (text: string) => text.trim() ? [{ type: 'text' as const, text }] : [];
+
+const ANTHROPIC_MAX_TOKENS = 8192;
 
 /**
  * Sanitize ChatMessage array for API consumption.
@@ -226,6 +299,28 @@ const sanitizeMessagesForApi = (messages: ChatMessage[]): Array<{ role: string; 
       }
       return sanitized;
     });
+};
+
+/**
+ * Merge consecutive messages with the same role. Some APIs (Perplexity) require
+ * strictly alternating user/assistant turns, which breaks once an empty or
+ * failed assistant reply has been filtered out.
+ */
+const mergeConsecutiveRoles = <T extends { role: string; content: string; image?: string }>(messages: T[]): T[] => {
+  const merged: T[] = [];
+  for (const m of messages) {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.role === m.role && m.role !== 'system') {
+      merged[merged.length - 1] = {
+        ...prev,
+        content: [prev.content, m.content].filter(Boolean).join('\n\n'),
+        image: m.image || prev.image
+      };
+    } else {
+      merged.push(m);
+    }
+  }
+  return merged;
 };
 
 const formatDate = (date: Date = new Date()): string => {
@@ -294,13 +389,7 @@ const callOpenAIImageGeneration = async (apiKey: string, baseUrl: string, model:
   });
 
   if (!response.ok) {
-    const err = await response.text();
-    try {
-      const jsonErr = JSON.parse(err);
-      throw new Error(jsonErr.error?.message || response.statusText);
-    } catch {
-      throw new Error(err || response.statusText);
-    }
+    await throwApiError(response);
   }
 
   const data = await response.json();
@@ -319,11 +408,41 @@ interface WebSearchResult {
   sources: Array<{ title: string; url: string; snippet?: string }>;
 }
 
+const KAGI_HEADER_RULE_ID = 9001;
+
+// `cookie` and `origin` are forbidden fetch headers, so the browser drops them
+// silently. Attach them with a session rule scoped to the extension's own
+// (non-tab) requests instead.
+const setKagiSessionHeaders = async (kagiSession: string) => {
+  if (!chrome.declarativeNetRequest?.updateSessionRules) return;
+  await chrome.declarativeNetRequest.updateSessionRules({
+    removeRuleIds: [KAGI_HEADER_RULE_ID],
+    addRules: [{
+      id: KAGI_HEADER_RULE_ID,
+      priority: 1,
+      action: {
+        type: chrome.declarativeNetRequest.RuleActionType.MODIFY_HEADERS,
+        requestHeaders: [
+          { header: 'cookie', operation: chrome.declarativeNetRequest.HeaderOperation.SET, value: `kagi_session=${kagiSession}` },
+          { header: 'origin', operation: chrome.declarativeNetRequest.HeaderOperation.SET, value: 'https://kagi.com' }
+        ]
+      },
+      condition: {
+        urlFilter: '||kagi.com/mother/context',
+        tabIds: [-1], // chrome.tabs.TAB_ID_NONE: requests not tied to a tab
+        resourceTypes: [chrome.declarativeNetRequest.ResourceType.XMLHTTPREQUEST]
+      }
+    }]
+  });
+};
+
 // Execute web search using Kagi
 const executeKagiWebSearch = async (query: string, kagiSession: string, signal?: AbortSignal): Promise<WebSearchResult> => {
   try {
     // URL encode the query
     const encodedQuery = encodeURIComponent(query).replace(/%20/g, '+');
+
+    await setKagiSessionHeaders(kagiSession).catch(e => console.warn('Failed to set Kagi session headers:', e));
 
     const response = await fetch(`https://kagi.com/mother/context?q=${encodedQuery}`, {
       method: 'POST',
@@ -331,11 +450,7 @@ const executeKagiWebSearch = async (query: string, kagiSession: string, signal?:
         'accept': 'application/vnd.kagi.stream',
         'accept-language': 'en-US,en;q=0.9',
         'cache-control': 'no-cache',
-        'content-length': '0',
-        'origin': 'https://kagi.com',
-        'pragma': 'no-cache',
-        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36',
-        'cookie': `kagi_session=${kagiSession}`
+        'pragma': 'no-cache'
       },
       signal
     });
@@ -452,8 +567,7 @@ const executePerplexityWebSearch = async (query: string, config: AppConfig, sign
     });
 
     if (!response.ok) {
-      const err = await response.json();
-      return { content: `Search error: ${err.error?.message || response.statusText}`, sources: [] };
+      return { content: `Search error: ${await readErrorMessage(response)}`, sources: [] };
     }
 
     const data = await response.json();
@@ -517,7 +631,10 @@ const executeGoogleWebSearch = async (query: string, config: AppConfig, signal?:
   } else if (currentProviderKeys && currentProviderKeys.length > 0) {
     // Use current provider (likely supports Gemini models)
     apiKey = currentProviderKeys[Math.floor(Math.random() * currentProviderKeys.length)];
-    baseUrl = config.customBaseUrls[currentProvider] || '';
+    baseUrl = config.customBaseUrls[currentProvider] || getDefaultBaseUrl(currentProvider);
+    if (!baseUrl) {
+      return { content: `Error: No base URL configured for ${currentProvider}.`, sources: [] };
+    }
     useOpenAIFormat = currentProvider !== 'google'; // Custom providers use OpenAI format
   } else {
     return { content: 'Error: No API key available for web search.', sources: [] };
@@ -559,8 +676,7 @@ const executeGoogleWebSearch = async (query: string, config: AppConfig, signal?:
       body: JSON.stringify(requestBody)
     });
     if (!response.ok) {
-      const err = await response.json();
-      return { content: `Google search error: ${err.error?.message || response.statusText}`, sources: [] };
+      return { content: `Google search error: ${await readErrorMessage(response)}`, sources: [] };
     }
 
     const data = await response.json();
@@ -611,7 +727,10 @@ const executeGoogleWebSearch = async (query: string, config: AppConfig, signal?:
 // Brave API key round-robin state (persisted so rotation survives restarts)
 const BRAVE_RR_STORAGE_KEY = 'braveKeyIndex';
 
-const nextBraveKey = async (keys: string[]): Promise<string> => {
+const nextBraveKey = async (allKeys: string[]): Promise<string> => {
+  // Skip keys marked exhausted, unless every key is (quotas may have reset)
+  const available = await getAvailableKeys(allKeys, 'brave');
+  const keys = available.length > 0 ? available : allKeys;
   if (keys.length === 1) return keys[0];
   try {
     const result = await chrome.storage.local.get(BRAVE_RR_STORAGE_KEY) as Record<string, number>;
@@ -663,14 +782,11 @@ const executeBraveWebSearch = async (query: string, config: AppConfig, signal?: 
     });
 
     if (!response.ok) {
-      let errText = response.statusText;
-      try {
-        const err = await response.json();
-        errText = err.error?.message || err.message || errText;
-      } catch { /* keep statusText */ }
-      // Rotate away from an exhausted/invalid key
-      if (isQuotaError(errText)) {
-        await markKeyExhausted(apiKey, 'brave');
+      const errText = await readErrorMessage(response);
+      // Rotate away from an exhausted/rate-limited key
+      const expiresAt = getKeyExhaustionExpiry(errText, response.status);
+      if (expiresAt) {
+        await markKeyExhausted(apiKey, 'brave', expiresAt);
       }
       return { content: `Brave search error: ${errText}`, sources: [] };
     }
@@ -809,22 +925,19 @@ const getExhaustedKeys = async (): Promise<ExhaustedKeyEntry[]> => {
   }
 };
 
-// Mark a key as exhausted
-const markKeyExhausted = async (key: string, provider: string): Promise<void> => {
+// Mark a key as exhausted until expiresAt
+const markKeyExhausted = async (key: string, provider: string, expiresAt: number): Promise<void> => {
   try {
-    const entries = await getExhaustedKeys();
-    // Check if already marked
-    if (entries.some(e => e.key === key && e.provider === provider)) {
-      return;
-    }
+    const entries = (await getExhaustedKeys())
+      .filter(e => !(e.key === key && e.provider === provider));
     entries.push({
       key,
       provider,
       exhaustedAt: Date.now(),
-      expiresAt: getNextMonthReset()
+      expiresAt
     });
     await chrome.storage.local.set({ [EXHAUSTED_KEYS_STORAGE_KEY]: entries });
-    console.log(`API key marked as exhausted for ${provider}, will reset on next month`);
+    console.log(`API key marked as exhausted for ${provider} until ${new Date(expiresAt).toLocaleString()}`);
   } catch (e) {
     console.error('Failed to mark key as exhausted:', e);
   }
@@ -839,22 +952,28 @@ const getAvailableKeys = async (allKeys: string[], provider: string): Promise<st
   return allKeys.filter(k => !exhaustedForProvider.has(k));
 };
 
-// Check if error indicates quota exhaustion
-const isQuotaError = (error: string): boolean => {
-  const quotaPatterns = [
-    'quota',
-    'rate limit',
-    'rate_limit',
-    'too many requests',
-    'exceeded',
-    'insufficient_quota',
-    'billing',
-    'credits',
-    '429',
-    'resource_exhausted'
-  ];
+// Short cooldown for rate limits, which usually clear within minutes
+const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
+
+// Decide whether an error means the key should be rested, and until when.
+// Returns null for errors unrelated to the key (e.g. context_length_exceeded).
+const getKeyExhaustionExpiry = (error: string, status?: number): number | null => {
   const lowerError = error.toLowerCase();
-  return quotaPatterns.some(p => lowerError.includes(p));
+
+  // Account out of credits: won't recover until the billing period resets
+  if (status === 402 || /insufficient_quota|credit balance|out of credits|payment required/.test(lowerError)) {
+    return getNextMonthReset();
+  }
+
+  if (status === 429 || /rate[ _-]?limit|too many requests|resource_exhausted|resource has been exhausted|\bquota\b/.test(lowerError)) {
+    return Date.now() + RATE_LIMIT_COOLDOWN_MS;
+  }
+
+  if (/\bbilling\b/.test(lowerError)) {
+    return getNextMonthReset();
+  }
+
+  return null;
 };
 
 // Select a random available key
@@ -915,16 +1034,18 @@ export const executeApiCall = async (
     }
 
     // Check if response indicates quota exhaustion
-    if (result.error && isQuotaError(result.error)) {
-      await markKeyExhausted(apiKey, provider);
+    const resultExpiry = result.error ? getKeyExhaustionExpiry(result.error) : null;
+    if (resultExpiry) {
+      await markKeyExhausted(apiKey, provider, resultExpiry);
     }
 
     return result;
   } catch (e: any) {
     const errorMsg = e.message || 'API call failed';
     // Check if error indicates quota exhaustion
-    if (isQuotaError(errorMsg)) {
-      await markKeyExhausted(apiKey, provider);
+    const errorExpiry = getKeyExhaustionExpiry(errorMsg, e instanceof ApiError ? e.status : undefined);
+    if (errorExpiry) {
+      await markKeyExhausted(apiKey, provider, errorExpiry);
     }
     return { text: '', error: errorMsg };
   }
@@ -978,8 +1099,9 @@ export const executeApiStream = async (
     }
 
     // Check if response indicates quota exhaustion
-    if (result.error && isQuotaError(result.error)) {
-      await markKeyExhausted(apiKey, provider);
+    const resultExpiry = result.error ? getKeyExhaustionExpiry(result.error) : null;
+    if (resultExpiry) {
+      await markKeyExhausted(apiKey, provider, resultExpiry);
     }
 
     return result;
@@ -987,8 +1109,9 @@ export const executeApiStream = async (
     if (e.name === 'AbortError') throw e;
     const errorMsg = e.message || 'Stream failed';
     // Check if error indicates quota exhaustion
-    if (isQuotaError(errorMsg)) {
-      await markKeyExhausted(apiKey, provider);
+    const errorExpiry = getKeyExhaustionExpiry(errorMsg, e instanceof ApiError ? e.status : undefined);
+    if (errorExpiry) {
+      await markKeyExhausted(apiKey, provider, errorExpiry);
     }
     return { text: '', error: errorMsg };
   }
@@ -1007,94 +1130,92 @@ export const callApi = async (
     return callChromeNano(injectSystemPrompt(messages, config), onChunk, signal);
   }
 
-  // Check context
+  // Both content scripts and extension pages stream through the background so
+  // the request can continue when the popup closes.
+  if (onChunk) {
+    return streamViaBackground(messages, config, onChunk, signal, onWebSearch, onReasoning, onImage);
+  }
+
   if (window.location.protocol.startsWith('http')) {
     // Content Script -> Proxy to Background
-    if (onChunk) {
-      return new Promise((resolve, reject) => {
-        const port = chrome.runtime.connect({ name: 'stream_api' });
-        let fullText = '';
-
-        if (signal) {
-          signal.addEventListener('abort', () => {
-            // Send abort message to background instead of just disconnecting
-            // This tells background to actually stop the stream
-            chrome.runtime.sendMessage({ action: 'abort_stream' }).catch(() => { });
-            port.disconnect();
-            reject(new DOMException('Aborted', 'AbortError'));
-          });
-        }
-
-        port.onMessage.addListener((msg) => {
-          if (msg.done) {
-            port.disconnect();
-            resolve({ text: fullText });
-          } else if (msg.error) {
-            port.disconnect();
-            resolve({ text: fullText, error: msg.error });
-          } else if (msg.chunk) {
-            fullText += msg.chunk;
-            onChunk(msg.chunk);
-          } else if (msg.reasoning && onReasoning) {
-            // Handle reasoning content from background
-            onReasoning(msg.reasoning);
-          } else if (msg.webSearch && onWebSearch) {
-            // Handle web search status from background
-            onWebSearch(msg.webSearch);
-          } else if (msg.image && onImage) {
-            // Handle image from background
-            onImage(msg.image);
-          }
-        });
-
-        port.postMessage({ messages, config });
-      });
-    } else {
-      return chrome.runtime.sendMessage({
-        type: 'PROXY_API_CALL',
-        data: { messages, config }
-      });
-    }
-  } else {
-    // Extension Context -> Also use port-based streaming for background continuation
-    if (onChunk) {
-      return new Promise((resolve, reject) => {
-        const port = chrome.runtime.connect({ name: 'stream_api' });
-        let fullText = '';
-
-        if (signal) {
-          signal.addEventListener('abort', () => {
-            chrome.runtime.sendMessage({ action: 'abort_stream' }).catch(() => { });
-            port.disconnect();
-            reject(new DOMException('Aborted', 'AbortError'));
-          });
-        }
-
-        port.onMessage.addListener((msg) => {
-          if (msg.done) {
-            port.disconnect();
-            resolve({ text: fullText });
-          } else if (msg.error) {
-            port.disconnect();
-            resolve({ text: fullText, error: msg.error });
-          } else if (msg.chunk) {
-            fullText += msg.chunk;
-            onChunk(msg.chunk);
-          } else if (msg.reasoning && onReasoning) {
-            onReasoning(msg.reasoning);
-          } else if (msg.webSearch && onWebSearch) {
-            onWebSearch(msg.webSearch);
-          } else if (msg.image && onImage) {
-            onImage(msg.image);
-          }
-        });
-
-        port.postMessage({ messages, config });
-      });
-    } else {
-      return executeApiCall(messages, config);
-    }
+    return chrome.runtime.sendMessage({
+      type: 'PROXY_API_CALL',
+      data: { messages, config }
+    });
   }
+  return executeApiCall(messages, config);
+};
+
+const streamViaBackground = (
+  messages: ChatMessage[],
+  config: AppConfig,
+  onChunk: (text: string) => void,
+  signal?: AbortSignal,
+  onWebSearch?: (status: { query: string; result?: string; isSearching: boolean; sources?: Array<{ title: string; url: string; snippet?: string }>; startNewMessage?: boolean }) => void,
+  onReasoning?: (text: string) => void,
+  onImage?: (imageUrl: string) => void
+): Promise<ApiResponse> => {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+
+    const port = chrome.runtime.connect({ name: 'stream_api' });
+    let fullText = '';
+    // Generated here so Stop can target this stream even before the background
+    // has started it
+    const streamId = crypto.randomUUID();
+    let settled = false;
+
+    const settle = (result: ApiResponse | DOMException) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      try { port.disconnect(); } catch { /* already disconnected */ }
+      if (result instanceof DOMException) {
+        reject(result);
+      } else {
+        resolve(result);
+      }
+    };
+
+    const onAbort = () => {
+      // Tell background to stop this specific stream (disconnecting alone keeps it running)
+      chrome.runtime.sendMessage({ action: 'abort_stream', streamId }).catch(() => { });
+      settle(new DOMException('Aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort);
+
+    // Fires when the background side goes away (e.g. the service worker was
+    // terminated mid-stream). Without this the caller would wait forever.
+    port.onDisconnect.addListener(() => {
+      settle({
+        text: fullText,
+        error: 'Connection to the background was lost before the response finished. Please try again.'
+      });
+    });
+
+    port.onMessage.addListener((msg) => {
+      if (settled) return;
+      if (msg.done) {
+        settle({ text: fullText });
+      } else if (msg.error) {
+        settle({ text: fullText, error: msg.error });
+      } else if (msg.chunk) {
+        fullText += msg.chunk;
+        onChunk(msg.chunk);
+      } else if (msg.reasoning && onReasoning) {
+        onReasoning(msg.reasoning);
+      } else if (msg.webSearch && onWebSearch) {
+        onWebSearch(msg.webSearch);
+      } else if (msg.image && onImage) {
+        onImage(msg.image);
+      }
+    });
+
+    port.postMessage({ messages, config, streamId });
+  });
 };
 
 export const executeFetchModels = async (
@@ -1176,7 +1297,8 @@ const callGoogle = async (apiKey: string, baseUrl: string, model: string, messag
 
   // Convert standard messages to Gemini format
   const contents = chatMessages.map(m => {
-    const parts: any[] = [{ text: m.content }];
+    // Gemini rejects empty text parts, which image-only messages would produce
+    const parts: any[] = (m.content.trim() || !m.image) ? [{ text: m.content }] : [];
     if (m.image) {
       const imagePart = parseImageForGemini(m.image);
       if (imagePart) {
@@ -1206,8 +1328,7 @@ const callGoogle = async (apiKey: string, baseUrl: string, model: string, messag
   });
 
   if (!response.ok) {
-    const err = await response.json();
-    throw new Error(err.error?.message || response.statusText);
+    await throwApiError(response);
   }
 
   const data = await response.json();
@@ -1229,7 +1350,7 @@ const callOpenAI = async (apiKey: string, baseUrl: string, model: string, messag
       return {
         role: m.role,
         content: [
-          { type: "text", text: m.content },
+          ...imageMessageTextPart(m.content),
           { type: "image_url", image_url: { url: m.image } }
         ]
       };
@@ -1250,8 +1371,7 @@ const callOpenAI = async (apiKey: string, baseUrl: string, model: string, messag
   });
 
   if (!response.ok) {
-    const err = await response.json();
-    throw new Error(err.error?.message || response.statusText);
+    await throwApiError(response);
   }
 
   const data = await response.json();
@@ -1273,7 +1393,7 @@ const callAnthropic = async (apiKey: string, baseUrl: string, model: string, mes
         role: m.role,
         content: [
           { type: "image", source: { type: "base64", media_type: mimeType, data } },
-          { type: "text", text: m.content }
+          ...imageMessageTextPart(m.content)
         ]
       };
     }
@@ -1282,7 +1402,7 @@ const callAnthropic = async (apiKey: string, baseUrl: string, model: string, mes
 
   const body: any = {
     model: model,
-    max_tokens: 1024,
+    max_tokens: ANTHROPIC_MAX_TOKENS,
     messages: chatMessages
   };
 
@@ -1301,8 +1421,7 @@ const callAnthropic = async (apiKey: string, baseUrl: string, model: string, mes
   });
 
   if (!response.ok) {
-    const err = await response.json();
-    throw new Error(err.error?.message || response.statusText);
+    await throwApiError(response);
   }
 
   const data = await response.json();
@@ -1310,13 +1429,6 @@ const callAnthropic = async (apiKey: string, baseUrl: string, model: string, mes
 };
 
 const callOpenRouter = async (apiKey: string, baseUrl: string, model: string, messages: ChatMessage[]): Promise<ApiResponse> => {
-  if (shouldUseImageGenerationsEndpoint(model)) {
-    return callOpenAIImageGeneration(apiKey, baseUrl, model, messages, undefined, {
-      'HTTP-Referer': 'https://github.com/your/repo',
-      'X-Title': 'AI Ask Extension',
-    });
-  }
-
   // OpenRouter is OpenAI compatible
   const url = `${baseUrl}/chat/completions`;
 
@@ -1328,7 +1440,7 @@ const callOpenRouter = async (apiKey: string, baseUrl: string, model: string, me
       return {
         role: m.role,
         content: [
-          { type: "text", text: m.content },
+          ...imageMessageTextPart(m.content),
           { type: "image_url", image_url: { url: m.image } }
         ]
       };
@@ -1352,8 +1464,7 @@ const callOpenRouter = async (apiKey: string, baseUrl: string, model: string, me
   });
 
   if (!response.ok) {
-    const err = await response.json();
-    throw new Error(err.error?.message || response.statusText);
+    await throwApiError(response);
   }
 
   const data = await response.json();
@@ -1365,14 +1476,14 @@ const callPerplexity = async (apiKey: string, baseUrl: string, model: string, me
   const url = `${baseUrl}/chat/completions`;
 
   // Sanitize messages to remove UI-only fields and filter empty messages
-  const sanitizedMessages = sanitizeMessagesForApi(messages);
+  const sanitizedMessages = mergeConsecutiveRoles(sanitizeMessagesForApi(messages));
 
   const msgs = sanitizedMessages.map(m => {
     if (m.image) {
       return {
         role: m.role,
         content: [
-          { type: "text", text: m.content },
+          ...imageMessageTextPart(m.content),
           { type: "image_url", image_url: { url: m.image } }
         ]
       };
@@ -1396,8 +1507,7 @@ const callPerplexity = async (apiKey: string, baseUrl: string, model: string, me
   });
 
   if (!response.ok) {
-    const err = await response.json();
-    throw new Error(err.error?.message || response.statusText);
+    await throwApiError(response);
   }
 
   const data = await response.json();
@@ -1405,6 +1515,27 @@ const callPerplexity = async (apiKey: string, baseUrl: string, model: string, me
 }
 
 // Streaming Implementations
+
+const STREAM_INTERRUPTED_ERROR = 'The response stream ended unexpectedly before completion. Please try again.';
+
+// Servers report mid-stream failures (e.g. upstream canceled) as an SSE event
+// like `data: {"error": {...}}` instead of an HTTP status, so surface them as errors.
+const throwIfStreamError = (line: string) => {
+  const trim = line.trim();
+  if (!trim.startsWith('data:') || !trim.includes('"error"')) return;
+
+  let json: any;
+  try {
+    json = JSON.parse(trim.slice(5).trim());
+  } catch {
+    return;
+  }
+
+  const err = json?.error ?? (json?.type === 'error' ? json : undefined);
+  if (!err) return;
+  const message = typeof err === 'string' ? err : err.message || JSON.stringify(err);
+  throw new Error(message);
+};
 
 const readStream = async (response: Response, onChunk: (text: string) => void, parser: (chunk: string) => string | null) => {
   const reader = response.body?.getReader();
@@ -1436,6 +1567,12 @@ const readStream = async (response: Response, onChunk: (text: string) => void, p
     buffer = lines.pop() || ''; // Keep the last partial line
 
     for (const line of lines) {
+      try {
+        throwIfStreamError(line);
+      } catch (e) {
+        reader.cancel().catch(() => { });
+        throw e;
+      }
       const parsed = parser(line);
       if (parsed) onChunk(parsed);
     }
@@ -1443,6 +1580,7 @@ const readStream = async (response: Response, onChunk: (text: string) => void, p
 
   // Process remaining buffer
   if (buffer) {
+    throwIfStreamError(buffer);
     const parsed = parser(buffer);
     if (parsed) onChunk(parsed);
   }
@@ -1459,7 +1597,7 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
       return {
         role: m.role,
         content: [
-          { type: "text", text: m.content },
+          ...imageMessageTextPart(m.content),
           { type: "image_url", image_url: { url: m.image } }
         ]
       };
@@ -1477,13 +1615,10 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
     headers['X-Title'] = 'AI Ask Extension';
   }
 
-  if (shouldUseImageGenerationsEndpoint(model)) {
-    const extraHeaders: Record<string, string> = {};
-    if (isOpenRouter) {
-      extraHeaders['HTTP-Referer'] = headers['HTTP-Referer'];
-      extraHeaders['X-Title'] = headers['X-Title'];
-    }
-    const result = await callOpenAIImageGeneration(apiKey, baseUrl, model, messages, signal, extraHeaders);
+  // OpenRouter has no /images/generations; its image models answer via chat
+  // completions with `modalities` and stream images in delta.images.
+  if (!isOpenRouter && shouldUseImageGenerationsEndpoint(model)) {
+    const result = await callOpenAIImageGeneration(apiKey, baseUrl, model, messages, signal);
     if (result.text) {
       onChunk(result.text);
     }
@@ -1529,6 +1664,10 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
     stream: true
   };
 
+  if (isOpenRouter && model.toLowerCase().includes('image')) {
+    requestBody.modalities = ['image', 'text'];
+  }
+
 
   if (webSearchEnabled) {
     if (useNativeGrokSearch) {
@@ -1555,13 +1694,7 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
   });
 
   if (!response.ok) {
-    const err = await response.text();
-    try {
-      const jsonErr = JSON.parse(err);
-      throw new Error(jsonErr.error?.message || response.statusText);
-    } catch {
-      throw new Error(err || response.statusText);
-    }
+    await throwApiError(response);
   }
 
   let fullText = '';
@@ -1608,6 +1741,7 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
       nativeSearchAnnotations = choice.message.annotations;
     }
   } else {
+    let streamFinished = false;
     await readStream(response, (text) => {
       taggedContent.write(text);
     }, (line) => {
@@ -1615,24 +1749,19 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
       if (!trim || !trim.startsWith('data: ')) return null;
 
       const dataStr = trim.slice(6);
-      if (dataStr === '[DONE]') return null;
+      if (dataStr === '[DONE]') {
+        streamFinished = true;
+        return null;
+      }
 
       try {
         const json = JSON.parse(dataStr);
         const choice = json.choices?.[0];
+        if (choice?.finish_reason) streamFinished = true;
 
         // Check for tool calls
         if (choice?.delta?.tool_calls) {
-          for (const tc of choice.delta.tool_calls) {
-            if (tc.index !== undefined) {
-              if (!toolCalls[tc.index]) {
-                toolCalls[tc.index] = { id: '', type: 'function', function: { name: '', arguments: '' } };
-              }
-              if (tc.id) toolCalls[tc.index].id = tc.id;
-              if (tc.function?.name) toolCalls[tc.index].function.name = tc.function.name;
-              if (tc.function?.arguments) toolCalls[tc.index].function.arguments += tc.function.arguments;
-            }
-          }
+          accumulateToolCallDeltas(toolCalls, choice.delta.tool_calls);
         }
 
         // Extract grounding metadata for Gemini models in streaming
@@ -1662,8 +1791,8 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
           }
         }
 
-        // Handle reasoning_content (used by models like DeepSeek)
-        const reasoningContent = choice?.delta?.reasoning_content;
+        // Handle reasoning_content (DeepSeek and others) / reasoning (OpenRouter)
+        const reasoningContent = choice?.delta?.reasoning_content ?? choice?.delta?.reasoning;
         if (reasoningContent && onReasoning) {
           onReasoning(reasoningContent);
         }
@@ -1685,6 +1814,12 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
       }
     });
     taggedContent.flush();
+
+    // Connection closed without [DONE]/finish_reason: the server dropped the
+    // request midway, so don't present the partial output as a finished answer.
+    if (!streamFinished) {
+      return { text: fullText, error: STREAM_INTERRUPTED_ERROR };
+    }
   }
 
   // If we have grounding sources from native Google search, notify the UI
@@ -1723,12 +1858,13 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
 
   // Handle tool calls recursively - AI may request multiple web searches in sequence
   // Skip for native OpenAI search since it handles web search internally via web_search_options
-  if (toolCalls.length > 0 && config && webSearchEnabled && !useNativeOpenAISearch && !useNativeGrokSearch) {
-    let currentToolCalls = toolCalls;
+  if (toolCalls.some(tc => tc?.function?.name) && config && webSearchEnabled && !useNativeOpenAISearch && !useNativeGrokSearch) {
+    let currentToolCalls = toolCalls.filter(tc => tc?.function?.name);
     let currentMessages = msgsWithSystem;
     let currentFullText = fullText;
     const MAX_TOOL_ITERATIONS = 5; // Prevent infinite loops
     let iteration = 0;
+    let followUpError: string | null = null;
 
     while (currentToolCalls.length > 0 && iteration < MAX_TOOL_ITERATIONS) {
       iteration++;
@@ -1887,28 +2023,36 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
               followUpToolCalls = choice.message.tool_calls;
             }
           } else {
+            let followUpFinished = false;
             await readStream(followUpResponse, (text) => {
               followUpTaggedContent.write(text);
             }, (line) => {
               const trim = line.trim();
               if (!trim || !trim.startsWith('data: ')) return null;
               const dataStr = trim.slice(6);
-              if (dataStr === '[DONE]') return null;
+              if (dataStr === '[DONE]') {
+                followUpFinished = true;
+                return null;
+              }
               try {
                 const json = JSON.parse(dataStr);
                 const choice = json.choices?.[0];
+                if (choice?.finish_reason) followUpFinished = true;
 
                 // Check for tool calls in streaming response
                 if (choice?.delta?.tool_calls) {
-                  for (const tc of choice.delta.tool_calls) {
-                    if (tc.index !== undefined) {
-                      if (!followUpToolCalls[tc.index]) {
-                        followUpToolCalls[tc.index] = { id: '', type: 'function', function: { name: '', arguments: '' } };
-                      }
-                      if (tc.id) followUpToolCalls[tc.index].id = tc.id;
-                      if (tc.function?.name) followUpToolCalls[tc.index].function.name = tc.function.name;
-                      if (tc.function?.arguments) followUpToolCalls[tc.index].function.arguments += tc.function.arguments;
-                    }
+                  accumulateToolCallDeltas(followUpToolCalls, choice.delta.tool_calls);
+                }
+
+                const followUpReasoning = choice?.delta?.reasoning_content ?? choice?.delta?.reasoning;
+                if (followUpReasoning && onReasoning) {
+                  onReasoning(followUpReasoning);
+                }
+
+                const followUpImages = choice?.delta?.images;
+                if (Array.isArray(followUpImages) && onImage) {
+                  for (const img of followUpImages) {
+                    if (img?.image_url?.url) onImage(img.image_url.url);
                   }
                 }
 
@@ -1918,12 +2062,17 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
               }
             });
             followUpTaggedContent.flush();
+
+            if (!followUpFinished) {
+              followUpError = STREAM_INTERRUPTED_ERROR;
+              break;
+            }
           }
 
           // Update state for next iteration
           currentMessages = followUpMessages;
           currentFullText = followUpText;
-          currentToolCalls = followUpToolCalls.filter(tc => tc.function?.name === 'web_search');
+          currentToolCalls = followUpToolCalls.filter(tc => tc?.function?.name === 'web_search');
 
           // If no more tool calls, we're done
           if (currentToolCalls.length === 0) {
@@ -1931,14 +2080,22 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
           }
         } else {
           // Follow-up request failed, stop iteration
+          const errText = await followUpResponse.text().catch(() => '');
+          let errMessage = errText || followUpResponse.statusText || `HTTP ${followUpResponse.status}`;
+          try {
+            errMessage = JSON.parse(errText).error?.message || errMessage;
+          } catch { /* not JSON */ }
+          followUpError = errMessage;
           currentToolCalls = [];
           break;
         }
-      } catch (e) {
+      } catch (e: any) {
+        if (e?.name === 'AbortError') throw e;
         console.error('Parallel tool calls failed:', e);
         if (onWebSearch) {
           onWebSearch({ query: '', result: 'Search failed', isSearching: false, sources: [] });
         }
+        followUpError = e?.message || 'Follow-up request failed';
         currentToolCalls = [];
         break;
       }
@@ -1947,6 +2104,10 @@ const streamOpenAI = async (apiKey: string, baseUrl: string, model: string, mess
       if (currentToolCalls.length === 0) {
         break;
       }
+    }
+
+    if (followUpError) {
+      return { text: fullText, error: followUpError };
     }
   }
 
@@ -1968,7 +2129,7 @@ const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, m
         role: m.role,
         content: [
           { type: "image", source: { type: "base64", media_type: mimeType, data } },
-          { type: "text", text: m.content }
+          ...imageMessageTextPart(m.content)
         ]
       };
     }
@@ -1977,7 +2138,7 @@ const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, m
 
   const body: any = {
     model: model,
-    max_tokens: 1024,
+    max_tokens: ANTHROPIC_MAX_TOKENS,
     messages: chatMessages,
     stream: true
   };
@@ -1998,8 +2159,7 @@ const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, m
   });
 
   if (!response.ok) {
-    const err = await response.json();
-    throw new Error(err.error?.message || response.statusText);
+    await throwApiError(response);
   }
 
   let fullText = '';
@@ -2017,6 +2177,8 @@ const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, m
       taggedContent.flush();
     }
   } else {
+    let streamFinished = false;
+    let hitMaxTokens = false;
     await readStream(response, (text) => {
       taggedContent.write(text);
     }, (line) => {
@@ -2026,6 +2188,12 @@ const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, m
       const dataStr = trim.slice(6);
       try {
         const json = JSON.parse(dataStr);
+        if (json.type === 'message_stop') {
+          streamFinished = true;
+        }
+        if (json.type === 'message_delta' && json.delta?.stop_reason === 'max_tokens') {
+          hitMaxTokens = true;
+        }
         if (json.type === 'content_block_delta' && json.delta?.text) {
           return json.delta.text;
         }
@@ -2035,6 +2203,13 @@ const streamAnthropic = async (apiKey: string, baseUrl: string, model: string, m
       }
     });
     taggedContent.flush();
+
+    if (!streamFinished) {
+      return { text: fullText, error: STREAM_INTERRUPTED_ERROR };
+    }
+    if (hitMaxTokens) {
+      return { text: fullText, error: `The response was cut off at the ${ANTHROPIC_MAX_TOKENS}-token output limit.` };
+    }
   }
 
   return { text: fullText };
@@ -2045,14 +2220,14 @@ const streamPerplexity = async (apiKey: string, baseUrl: string, model: string, 
   const url = `${baseUrl}/chat/completions`;
 
   // Sanitize messages to remove UI-only fields and filter empty messages
-  const sanitizedMessages = sanitizeMessagesForApi(messages);
+  const sanitizedMessages = mergeConsecutiveRoles(sanitizeMessagesForApi(messages));
 
   const msgs = sanitizedMessages.map(m => {
     if (m.image) {
       return {
         role: m.role,
         content: [
-          { type: "text", text: m.content },
+          ...imageMessageTextPart(m.content),
           { type: "image_url", image_url: { url: m.image } }
         ]
       };
@@ -2078,13 +2253,7 @@ const streamPerplexity = async (apiKey: string, baseUrl: string, model: string, 
   });
 
   if (!response.ok) {
-    const err = await response.text();
-    try {
-      const jsonErr = JSON.parse(err);
-      throw new Error(jsonErr.error?.message || response.statusText);
-    } catch {
-      throw new Error(err || response.statusText);
-    }
+    await throwApiError(response);
   }
 
   let fullText = '';
@@ -2102,6 +2271,7 @@ const streamPerplexity = async (apiKey: string, baseUrl: string, model: string, 
       taggedContent.flush();
     }
   } else {
+    let streamFinished = false;
     await readStream(response, (text) => {
       taggedContent.write(text);
     }, (line) => {
@@ -2109,10 +2279,14 @@ const streamPerplexity = async (apiKey: string, baseUrl: string, model: string, 
       if (!trim || !trim.startsWith('data: ')) return null;
 
       const dataStr = trim.slice(6);
-      if (dataStr === '[DONE]') return null;
+      if (dataStr === '[DONE]') {
+        streamFinished = true;
+        return null;
+      }
 
       try {
         const json = JSON.parse(dataStr);
+        if (json.choices?.[0]?.finish_reason) streamFinished = true;
         const content = json.choices?.[0]?.delta?.content;
         return content || null;
       } catch (e) {
@@ -2120,6 +2294,10 @@ const streamPerplexity = async (apiKey: string, baseUrl: string, model: string, 
       }
     });
     taggedContent.flush();
+
+    if (!streamFinished) {
+      return { text: fullText, error: STREAM_INTERRUPTED_ERROR };
+    }
   }
 
   return { text: fullText };
@@ -2139,7 +2317,8 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
   const chatMessages = sanitizedMessages.filter(m => m.role !== 'system');
 
   const contents = chatMessages.map(m => {
-    const parts: any[] = [{ text: m.content }];
+    // Gemini rejects empty text parts, which image-only messages would produce
+    const parts: any[] = (m.content.trim() || !m.image) ? [{ text: m.content }] : [];
     if (m.image) {
       const imagePart = parseImageForGemini(m.image);
       if (imagePart) {
@@ -2185,13 +2364,7 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
   });
 
   if (!response.ok) {
-    const err = await response.text();
-    try {
-      const jsonErr = JSON.parse(err);
-      throw new Error(jsonErr.error?.message || response.statusText);
-    } catch {
-      throw new Error(err || response.statusText);
-    }
+    await throwApiError(response);
   }
 
   let fullText = '';
@@ -2242,6 +2415,8 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
 
   if (contentType.includes('text/event-stream')) {
     // SSE format (alt=sse): each event is "data: {json}\n\n"
+    let streamFinished = false;
+    let blockReason: string | null = null;
     await readStream(response, (_text) => {
       // onChunk is called inside processGeminiResponse
     }, (line) => {
@@ -2251,6 +2426,8 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
       const dataStr = trim.slice(6);
       try {
         const json = JSON.parse(dataStr);
+        if (json.candidates?.[0]?.finishReason) streamFinished = true;
+        if (json.promptFeedback?.blockReason) blockReason = json.promptFeedback.blockReason;
         processGeminiResponse(json);
       } catch (e) {
         // ignore malformed lines
@@ -2258,6 +2435,13 @@ const streamGoogle = async (apiKey: string, baseUrl: string, model: string, mess
       return null; // We handle onChunk inside processGeminiResponse directly
     });
     taggedContent.flush();
+
+    if (blockReason) {
+      return { text: fullText, error: `The prompt was blocked by Gemini (${blockReason}).` };
+    }
+    if (!streamFinished) {
+      return { text: fullText, error: STREAM_INTERRUPTED_ERROR };
+    }
   } else if (contentType.includes('application/json')) {
     // JSON response - could be a single object or an array of objects
     const data = await response.json();

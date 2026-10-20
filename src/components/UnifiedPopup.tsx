@@ -186,7 +186,7 @@ export default function UnifiedPopup({
     const handleConfigUpdate = (newCfg: AppConfig) => {
         updateConfig(newCfg);
         if (isContentMode) {
-            setStorage(newCfg);
+            setStorage(newCfg).catch(e => console.error('[AI Assistant] Failed to save config:', e));
         }
     };
 

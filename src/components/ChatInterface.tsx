@@ -174,6 +174,25 @@ const CodeBlock = ({ node, children, ...props }: any) => {
     );
 };
 
+type WebSearchEntry = NonNullable<ChatMessage['webSearches']>[number];
+type WebSearchStatus = Parameters<NonNullable<Parameters<typeof callApi>[4]>>[0];
+
+// Returns a new list with the entry for the same query replaced, or the entry appended
+const upsertWebSearch = (searches: WebSearchEntry[] | undefined, entry: WebSearchEntry): WebSearchEntry[] => {
+    const list = searches ? [...searches] : [];
+    const existingIdx = list.findIndex(s => s.query === entry.query);
+    if (existingIdx >= 0) {
+        list[existingIdx] = entry;
+    } else {
+        list.push(entry);
+    }
+    return list;
+};
+
+// True if every message in `prefix` matches the message at the same position in `list`
+const isMessagePrefix = (prefix: ChatMessage[], list: ChatMessage[]) =>
+    prefix.every((m, i) => list[i] && list[i].role === m.role && list[i].content === m.content);
+
 const ProviderDisplayNames: Record<string, string> = {
     chrome: 'Chrome',
     openai: 'OpenAI',
@@ -263,6 +282,10 @@ export default function ChatInterface({
     const instructionRef = useRef(instruction);
     const selectedTextRef = useRef(selectedText);
     const selectedImageRef = useRef(selectedImage);
+    // Parents may pass a new callback every render; effects read it from here
+    const onStateChangeRef = useRef(onStateChange);
+    onStateChangeRef.current = onStateChange;
+    const mountedRef = useRef(true);
 
     // Sync refs
     useEffect(() => { messagesRef.current = messages; }, [messages]);
@@ -273,11 +296,13 @@ export default function ChatInterface({
 
     // Cleanup on unmount - always save state, DON'T abort the stream
     useEffect(() => {
+        mountedRef.current = true;
         return () => {
+            mountedRef.current = false;
             destroyChromeNanoSession();
             // Always save current state on unmount so it can be restored
-            if (onStateChange) {
-                onStateChange({
+            if (onStateChangeRef.current) {
+                onStateChangeRef.current({
                     instruction: instructionRef.current,
                     messages: [...messagesRef.current],
                     selectedText: selectedTextRef.current,
@@ -318,8 +343,19 @@ export default function ChatInterface({
                 // This handles the case where the background service worker restarted
                 // and lost its in-memory state.
                 if (stream.done && stream.accumulatedText) {
+                    const streamMessages = (stream.messages || []) as ChatMessage[];
+                    const current = messagesRef.current;
+                    // Don't let a finished stream override a different/newer conversation
+                    // (current may lag behind the stream if it was saved before the send)
+                    const belongsToCurrent = current.length === 0 || (current.length <= streamMessages.length
+                        ? isMessagePrefix(current, streamMessages)
+                        : isMessagePrefix(streamMessages, current) && current.slice(streamMessages.length).every(m => m.role === 'assistant'));
+                    if (!belongsToCurrent) {
+                        chrome.storage.local.remove('activeStream');
+                        return;
+                    }
                     const restoredMessages: ChatMessage[] = [
-                        ...(stream.messages || []) as ChatMessage[],
+                        ...streamMessages,
                         {
                             role: 'assistant' as const,
                             content: stream.accumulatedText,
@@ -331,8 +367,8 @@ export default function ChatInterface({
                     ];
                     setMessages(restoredMessages);
                     // Save the restored state
-                    if (onStateChange) {
-                        onStateChange({
+                    if (onStateChangeRef.current) {
+                        onStateChangeRef.current({
                             instruction: '',
                             messages: restoredMessages,
                             selectedText: '',
@@ -355,9 +391,11 @@ export default function ChatInterface({
                 // Save original messages so we can restore if background has no stream
                 const savedMessages = [...messagesRef.current];
 
-                // Restore the original conversation messages (including user's question)
+                // Restore the original conversation messages (including user's question),
+                // plus an empty assistant placeholder so "Thinking..." shows and reasoning,
+                // web searches and images that arrive before the first text chunk have a target
                 if (stream.messages && stream.messages.length > 0) {
-                    setMessages(stream.messages as ChatMessage[]);
+                    setMessages([...(stream.messages as ChatMessage[]), { role: 'assistant', content: '' }]);
                 }
 
                 setLoading(true);
@@ -366,44 +404,72 @@ export default function ChatInterface({
                 const reconnectController = new AbortController();
                 abortControllerRef.current = reconnectController;
 
-                const port = chrome.runtime.connect({ name: 'stream_reconnect' });
+                const port = chrome.runtime.connect({ name: `stream_reconnect:${stream.id}` });
                 let reconnectedText = '';
                 let reconnectedReasoning = '';
 
-                // Handle abort from Stop button
-                reconnectController.signal.addEventListener('abort', () => {
-                    chrome.runtime.sendMessage({ action: 'abort_stream' }).catch(() => { });
-                    port.disconnect();
-                    setLoading(false);
-                    abortControllerRef.current = null;
-                    // Mark last message as interrupted
+                // Immutably update the streaming assistant message (the last one), adding it if missing
+                const updateStreamingAssistant = (update: (msg: ChatMessage) => Partial<ChatMessage>) => {
                     setMessages(prev => {
                         const updated = [...prev];
                         const last = updated[updated.length - 1];
                         if (last && last.role === 'assistant') {
-                            last.interrupted = true;
+                            updated[updated.length - 1] = { ...last, ...update(last) };
+                        } else {
+                            const placeholder: ChatMessage = { role: 'assistant', content: '' };
+                            updated.push({ ...placeholder, ...update(placeholder) });
                         }
-                        return [...updated];
+                        return updated;
                     });
-                    chrome.runtime.sendMessage({ action: 'clear_active_stream' }).catch(() => { });
+                };
+
+                const markLastInterrupted = () => {
+                    setMessages(prev => {
+                        const last = prev[prev.length - 1];
+                        if (!last || last.role !== 'assistant') return prev;
+                        return [...prev.slice(0, -1), { ...last, interrupted: true }];
+                    });
+                };
+
+                // Handle abort from Stop button
+                reconnectController.signal.addEventListener('abort', () => {
+                    chrome.runtime.sendMessage({ action: 'abort_stream', streamId: stream.id }).catch(() => { });
+                    port.disconnect();
+                    setLoading(false);
+                    if (abortControllerRef.current === reconnectController) {
+                        abortControllerRef.current = null;
+                    }
+                    // Mark last message as interrupted
+                    markLastInterrupted();
+                    chrome.runtime.sendMessage({ action: 'clear_active_stream', streamId: stream.id }).catch(() => { });
                 });
 
-                // Helper to save final state
+                // Helper to save final state. Deferred so pending message updates have
+                // committed and messagesRef is current.
                 const saveReconnectedState = () => {
-                    if (onStateChange) {
-                        setMessages(prev => {
-                            onStateChange({
-                                instruction: '',
-                                messages: prev,
-                                selectedText: '',
-                                selectedImage: null
-                            });
-                            return prev;
+                    setTimeout(() => {
+                        onStateChangeRef.current?.({
+                            instruction: instructionRef.current,
+                            messages: messagesRef.current,
+                            selectedText: selectedTextRef.current,
+                            selectedImage: selectedImageRef.current
                         });
-                    }
+                    }, 0);
                 };
 
                 port.onMessage.addListener((msg) => {
+                    if (msg.noStream) {
+                        // Background service worker restarted and lost the stream.
+                        // Restore the original messages from popupState (before we overwrote them).
+                        // Checked first: older backgrounds send it together with done: true.
+                        port.disconnect();
+                        setLoading(false);
+                        abortControllerRef.current = null;
+                        setMessages(savedMessages);
+                        chrome.storage.local.remove('activeStream');
+                        return;
+                    }
+
                     if (msg.reconnected) {
                         // Stream is still running, we received buffered data
                         // Now listen for new chunks
@@ -412,61 +478,25 @@ export default function ChatInterface({
 
                     if (msg.chunk) {
                         reconnectedText += msg.chunk;
-                        // Update or add the assistant message with accumulated text
-                        setMessages(prev => {
-                            const updated = [...prev];
-                            let lastAssistant = updated[updated.length - 1];
-                            if (!lastAssistant || lastAssistant.role !== 'assistant') {
-                                // Add a new assistant message
-                                lastAssistant = { role: 'assistant', content: '' };
-                                updated.push(lastAssistant);
-                            }
-                            lastAssistant.content = reconnectedText;
-                            lastAssistant.responseTime = Date.now() - stream.startTime;
-                            return [...updated];
-                        });
+                        const content = reconnectedText;
+                        const responseTime = Date.now() - stream.startTime;
+                        updateStreamingAssistant(() => ({ content, responseTime }));
                     } else if (msg.reasoning) {
                         reconnectedReasoning += msg.reasoning;
-                        setMessages(prev => {
-                            const updated = [...prev];
-                            const last = updated[updated.length - 1];
-                            if (last && last.role === 'assistant') {
-                                last.reasoning = reconnectedReasoning;
-                            }
-                            return [...updated];
-                        });
+                        const reasoning = reconnectedReasoning;
+                        updateStreamingAssistant(() => ({ reasoning }));
                     } else if (msg.webSearch) {
-                        setMessages(prev => {
-                            const updated = [...prev];
-                            const last = updated[updated.length - 1];
-                            if (last && last.role === 'assistant') {
-                                const newEntry = {
-                                    query: msg.webSearch.query,
-                                    result: msg.webSearch.result || '',
-                                    isSearching: msg.webSearch.isSearching,
-                                    sources: msg.webSearch.sources
-                                };
-                                if (!last.webSearches) last.webSearches = [];
-                                // Update existing entry for same query or append
-                                const existingIdx = last.webSearches.findIndex(s => s.query === newEntry.query);
-                                if (existingIdx >= 0) {
-                                    last.webSearches[existingIdx] = newEntry;
-                                } else {
-                                    last.webSearches.push(newEntry);
-                                }
-                            }
-                            return [...updated];
-                        });
+                        const newEntry = {
+                            query: msg.webSearch.query,
+                            result: msg.webSearch.result || '',
+                            isSearching: msg.webSearch.isSearching,
+                            sources: msg.webSearch.sources
+                        };
+                        // Update existing entry for same query or append
+                        updateStreamingAssistant(last => ({ webSearches: upsertWebSearch(last.webSearches, newEntry) }));
                     } else if (msg.image) {
-                        setMessages(prev => {
-                            const updated = [...prev];
-                            const last = updated[updated.length - 1];
-                            if (last && last.role === 'assistant') {
-                                if (!last.images) last.images = [];
-                                last.images.push(msg.image);
-                            }
-                            return [...updated];
-                        });
+                        const image = msg.image as string;
+                        updateStreamingAssistant(last => ({ images: [...(last.images ?? []), image] }));
                     } else if (msg.done) {
                         port.disconnect();
                         setLoading(false);
@@ -474,28 +504,27 @@ export default function ChatInterface({
                         // Save final state so it persists when popup is closed/reopened
                         saveReconnectedState();
                         // Clear the active stream from storage
-                        chrome.runtime.sendMessage({ action: 'clear_active_stream' }).catch(() => { });
+                        chrome.runtime.sendMessage({ action: 'clear_active_stream', streamId: stream.id }).catch(() => { });
                     } else if (msg.error) {
                         setError(msg.error);
                         port.disconnect();
                         setLoading(false);
                         abortControllerRef.current = null;
                         saveReconnectedState();
-                        chrome.runtime.sendMessage({ action: 'clear_active_stream' }).catch(() => { });
-                    } else if (msg.noStream) {
-                        // Background service worker restarted and lost the stream.
-                        // Restore the original messages from popupState (before we overwrote them).
-                        port.disconnect();
-                        setLoading(false);
-                        abortControllerRef.current = null;
-                        setMessages(savedMessages);
-                        chrome.storage.local.remove('activeStream');
+                        chrome.runtime.sendMessage({ action: 'clear_active_stream', streamId: stream.id }).catch(() => { });
                     }
                 });
 
                 port.onDisconnect.addListener(() => {
-                    // If we disconnected without done, keep loading state
-                    // The stream is still running in background
+                    // Only fires when the background side went away (e.g. the service
+                    // worker was terminated), so the stream is lost - stop waiting for it.
+                    if (reconnectController.signal.aborted || abortControllerRef.current !== reconnectController) return;
+                    setLoading(false);
+                    abortControllerRef.current = null;
+                    setError('Connection to the background was lost before the response finished. Please try again.');
+                    markLastInterrupted();
+                    saveReconnectedState();
+                    chrome.storage.local.remove('activeStream');
                 });
             } catch (e) {
                 console.error('Failed to check active stream:', e);
@@ -505,11 +534,12 @@ export default function ChatInterface({
         checkActiveStream();
     }, []);
 
-    // Notify state changes
+    // Notify state changes (debounced). Depends only on the data, not on the callback
+    // identity, so an idle popup doesn't keep rewriting popupState.
     useEffect(() => {
-        if (onStateChange) {
+        if (onStateChangeRef.current) {
             const timer = setTimeout(() => {
-                onStateChange({
+                onStateChangeRef.current?.({
                     instruction,
                     messages,
                     selectedText,
@@ -518,28 +548,12 @@ export default function ChatInterface({
             }, 500);
             return () => clearTimeout(timer);
         }
-    }, [instruction, messages, selectedText, selectedImage, onStateChange]);
+    }, [instruction, messages, selectedText, selectedImage]);
 
-    // Update state when props change (important for re-opening with new context)
-    useEffect(() => {
-        setSelectedText(initialText);
-    }, [initialText]);
-
-    useEffect(() => {
-        setSelectedImage(initialImage);
-    }, [initialImage]);
-
-    useEffect(() => {
-        if (initialMessages.length > 0) {
-            setMessages(initialMessages);
-        }
-    }, [initialMessages]);
-
-    useEffect(() => {
-        if (initialInstruction) {
-            setInstruction(initialInstruction);
-        }
-    }, [initialInstruction]);
+    // The initial* props are only read on mount. The parent's state is hydrated before
+    // this component mounts (a new context remounts it), and afterwards it only changes
+    // by echoing our own onStateChange reports - syncing those back would overwrite
+    // newer local state with stale values.
 
     // Initialize reasoning elapsed times from saved messages
     useEffect(() => {
@@ -554,7 +568,7 @@ export default function ChatInterface({
                 setReasoningElapsed(elapsed);
             }
         }
-    }, [initialMessages]);
+    }, []);
 
     // Handle auto-execution
     useEffect(() => {
@@ -721,10 +735,10 @@ export default function ChatInterface({
 
                     // Also update the message itself for persistence
                     setMessages(prev => {
+                        const target = prev[idx];
+                        if (!target || target.role !== 'assistant' || !target.reasoning) return prev;
                         const updated = [...prev];
-                        if (updated[idx] && updated[idx].role === 'assistant' && updated[idx].reasoning) {
-                            updated[idx].reasoningTime = finalElapsed;
-                        }
+                        updated[idx] = { ...target, reasoningTime: finalElapsed };
                         return updated;
                     });
                 }
@@ -736,6 +750,163 @@ export default function ChatInterface({
         }
     }, [loading]);
 
+    // Close the image zoom with Escape
+    useEffect(() => {
+        if (!imageZoomOpen && !generatedImageZoom) return;
+        const handleEscape = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape' && e.key !== 'Esc') return;
+            // Don't let Escape also close the popup itself
+            e.preventDefault();
+            e.stopPropagation();
+            setImageZoomOpen(false);
+            setGeneratedImageZoom(null);
+        };
+        window.addEventListener('keydown', handleEscape, true);
+        return () => window.removeEventListener('keydown', handleEscape, true);
+    }, [imageZoomOpen, generatedImageZoom]);
+
+    // Immutably updates the assistant message at `index` (no-op if it is gone, e.g. after New Chat)
+    const updateAssistantAt = (index: number, update: (msg: ChatMessage) => Partial<ChatMessage>) => {
+        setMessages(prev => {
+            const target = prev[index];
+            if (!target || target.role !== 'assistant') return prev;
+            const updated = [...prev];
+            updated[index] = { ...target, ...update(target) };
+            return updated;
+        });
+    };
+
+    // Drops reasoning timer state for messages at or after `fromIndex`
+    const clearReasoningTimersFrom = (fromIndex: number) => {
+        const keep = (record: Record<number, number>) => {
+            const next: Record<number, number> = {};
+            Object.keys(record).forEach(key => {
+                const idx = parseInt(key);
+                if (idx < fromIndex) next[idx] = record[idx];
+            });
+            return next;
+        };
+        reasoningStartTimeRef.current = keep(reasoningStartTimeRef.current);
+        setReasoningStartTime(keep);
+        setReasoningElapsed(keep);
+    };
+
+    // Builds the callApi callbacks for one assistant response whose placeholder is at
+    // `firstIndex`. A web search can continue the answer in a follow-up message, so the
+    // current assistant index is tracked rather than assumed.
+    const createStreamHandlers = (firstIndex: number, startTime: number) => {
+        let assistantIndex = firstIndex;
+        let accumulatedText = '';
+        let accumulatedReasoning = '';
+        let reasoningFinalized = false; // Track if we've stopped the reasoning timer
+
+        clearReasoningTimersFrom(firstIndex);
+
+        // Stop the reasoning timer of the current message (when content starts)
+        const finalizeReasoningTimer = () => {
+            const index = assistantIndex;
+            const reasoningStart = reasoningStartTimeRef.current[index];
+            if (reasoningFinalized || !accumulatedReasoning || !reasoningStart) return;
+            reasoningFinalized = true;
+            const finalElapsed = Math.floor((Date.now() - reasoningStart) / 1000);
+            setReasoningElapsed(prev => ({ ...prev, [index]: finalElapsed }));
+            // Update message with final reasoning time
+            updateAssistantAt(index, () => ({ reasoningTime: finalElapsed }));
+            // Clear the start time for this message
+            delete reasoningStartTimeRef.current[index];
+            setReasoningStartTime(prev => {
+                const newState = { ...prev };
+                delete newState[index];
+                return newState;
+            });
+        };
+
+        const onChunk = (chunk: string) => {
+            // Finalize reasoning timer on first content chunk
+            finalizeReasoningTimer();
+            accumulatedText += chunk;
+            const content = accumulatedText;
+            const responseTime = Date.now() - startTime;
+            updateAssistantAt(assistantIndex, () => ({ content, responseTime }));
+        };
+
+        const onWebSearch = (searchStatus: WebSearchStatus) => {
+            const searchEntry: WebSearchEntry = {
+                query: searchStatus.query,
+                result: searchStatus.result || '',
+                isSearching: searchStatus.isSearching,
+                sources: searchStatus.sources
+            };
+            const index = assistantIndex;
+            if (searchStatus.startNewMessage) {
+                // Mark the search done and continue the answer in a new message
+                finalizeReasoningTimer();
+                setMessages(prev => {
+                    const target = prev[index];
+                    if (!target || target.role !== 'assistant') return prev;
+                    return [
+                        ...prev.slice(0, index),
+                        { ...target, webSearches: upsertWebSearch(target.webSearches, { ...searchEntry, isSearching: false }) },
+                        { role: 'assistant', content: '' }
+                    ];
+                });
+                assistantIndex = index + 1;
+                accumulatedText = ''; // Reset for new message
+                accumulatedReasoning = ''; // Reset reasoning for new message
+                reasoningFinalized = false;
+            } else {
+                // Update web search info on current message (search in progress or done)
+                updateAssistantAt(index, msg => ({ webSearches: upsertWebSearch(msg.webSearches, searchEntry) }));
+            }
+        };
+
+        // Handle reasoning content (from models like DeepSeek)
+        const onReasoning = (reasoningChunk: string) => {
+            accumulatedReasoning += reasoningChunk;
+            const index = assistantIndex;
+            // Start timer when first reasoning chunk arrives
+            if (accumulatedReasoning === reasoningChunk) {
+                const reasoningStart = Date.now();
+                reasoningStartTimeRef.current[index] = reasoningStart;
+                setReasoningStartTime(prev => ({ ...prev, [index]: reasoningStart }));
+            }
+            const reasoning = accumulatedReasoning;
+            updateAssistantAt(index, () => ({ reasoning }));
+        };
+
+        // Handle images from models that generate images
+        const onImage = (imageUrl: string) => {
+            updateAssistantAt(assistantIndex, msg => ({ images: [...(msg.images ?? []), imageUrl] }));
+        };
+
+        // Discard the partial response before retrying with another model
+        const reset = () => {
+            clearReasoningTimersFrom(firstIndex);
+            assistantIndex = firstIndex;
+            accumulatedText = '';
+            accumulatedReasoning = '';
+            reasoningFinalized = false;
+            setMessages(prev => prev.length > firstIndex
+                ? [...prev.slice(0, firstIndex), { role: 'assistant', content: '' }]
+                : prev);
+        };
+
+        // Aborted - still record response time (and reasoning time) for the interrupted message
+        const markInterrupted = () => {
+            const index = assistantIndex;
+            const responseTime = Date.now() - startTime;
+            const reasoningStart = reasoningStartTimeRef.current[index];
+            const reasoningTime = reasoningStart ? Math.floor((Date.now() - reasoningStart) / 1000) : undefined;
+            if (reasoningTime !== undefined) {
+                setReasoningElapsed(prev => ({ ...prev, [index]: reasoningTime }));
+            }
+            updateAssistantAt(index, () => (reasoningTime !== undefined
+                ? { interrupted: true, responseTime, reasoningTime }
+                : { interrupted: true, responseTime }));
+        };
+
+        return { onChunk, onWebSearch, onReasoning, onImage, reset, markInterrupted };
+    };
 
     const scrollToBottom = () => {
         // Use setTimeout to ensure DOM has updated
@@ -857,7 +1028,7 @@ export default function ChatInterface({
             onConfigUpdate(newConfig);
         } else {
             // Fallback for extension popup
-            await setStorage(newConfig);
+            await setStorage(newConfig).catch(e => console.error('[AI Assistant] Failed to save config:', e));
         }
         setIsModelMenuOpen(false);
     };
@@ -866,13 +1037,15 @@ export default function ChatInterface({
         // Close the retry menu
         setRetryModelMenuOpen(null);
 
+        // Only one request at a time - a second one would race the first over shared state
+        if (loading || loadingRef.current) return;
+
         // Remove the assistant message being retried (keep all messages before it)
         const newMessages = messages.slice(0, messageIndex);
-        setMessages(newMessages);
 
         // Temporarily switch to the backup model
         const previousProvider = config.selectedProvider;
-        const previousModel = config.selectedModel[previousProvider];
+        const previousModelForProvider = config.selectedModel[provider];
 
         const tempConfig = {
             ...config,
@@ -884,6 +1057,7 @@ export default function ChatInterface({
         };
         setConfig(tempConfig);
 
+        loadingRef.current = true;
         setLoading(true);
         setError('');
 
@@ -894,7 +1068,9 @@ export default function ChatInterface({
         if (abortControllerRef.current) {
             abortControllerRef.current.abort();
         }
-        abortControllerRef.current = new AbortController();
+        const controller = new AbortController();
+        abortControllerRef.current = controller;
+        const isCurrent = () => abortControllerRef.current === controller;
 
         // Add placeholder assistant message
         const assistantMsg: ChatMessage = { role: 'assistant', content: '' };
@@ -903,209 +1079,61 @@ export default function ChatInterface({
         // Scroll to bottom when retrying
         scrollToBottom();
 
-        let accumulatedText = '';
-        let accumulatedReasoning = '';
-        let isInNewMessage = false;
-        let reasoningFinalized = false;
-
-        // Helper to finalize reasoning timer when content starts
-        const finalizeReasoningTimer = (msgIndex: number) => {
-            if (!reasoningFinalized && accumulatedReasoning && reasoningStartTimeRef.current[msgIndex]) {
-                reasoningFinalized = true;
-                const finalElapsed = Math.floor((Date.now() - reasoningStartTimeRef.current[msgIndex]) / 1000);
-                setReasoningElapsed(prev => ({ ...prev, [msgIndex]: finalElapsed }));
-
-                setMessages(prev => {
-                    const updated = [...prev];
-                    if (updated[msgIndex] && updated[msgIndex].role === 'assistant') {
-                        updated[msgIndex].reasoningTime = finalElapsed;
-                    }
-                    return updated;
-                });
-
-                delete reasoningStartTimeRef.current[msgIndex];
-                setReasoningStartTime(prev => {
-                    const newState = { ...prev };
-                    delete newState[msgIndex];
-                    return newState;
-                });
-            }
-        };
+        const handlers = createStreamHandlers(newMessages.length, startTime);
 
         try {
-            const res = await callApi(newMessages, tempConfig, (chunk) => {
-                const msgIndex = newMessages.length;
-                finalizeReasoningTimer(msgIndex);
+            const res = await callApi(newMessages, tempConfig, handlers.onChunk, controller.signal,
+                handlers.onWebSearch, handlers.onReasoning, handlers.onImage);
 
-                if (isInNewMessage) {
-                    // Append to the new (follow-up) message
-                    accumulatedText += chunk;
-                    const currentResponseTime = Date.now() - startTime;
-                    setMessages(prev => {
-                        const updated = [...prev];
-                        const last = updated[updated.length - 1];
-                        if (last && last.role === 'assistant') {
-                            last.content = accumulatedText;
-                            last.responseTime = currentResponseTime;
-                        }
-                        return updated;
-                    });
-                } else {
-                    // Append to the initial message
-                    accumulatedText += chunk;
-                    const currentResponseTime = Date.now() - startTime;
-                    setMessages(prev => {
-                        const updated = [...prev];
-                        const last = updated[updated.length - 1];
-                        if (last && last.role === 'assistant') {
-                            last.content = accumulatedText;
-                            last.responseTime = currentResponseTime;
-                        }
-                        return updated;
-                    });
-                }
-            }, abortControllerRef.current.signal, (searchStatus) => {
-                const searchEntry = {
-                    query: searchStatus.query,
-                    result: searchStatus.result || '',
-                    isSearching: searchStatus.isSearching,
-                    sources: searchStatus.sources
-                };
-                if (searchStatus.startNewMessage) {
-                    // Create a new message for the follow-up response
-                    accumulatedText = ''; // Reset for new message
-                    accumulatedReasoning = ''; // Reset reasoning for new message
-                    setMessages(prev => {
-                        const updated = [...prev];
-                        const prevLast = updated[updated.length - 1];
-                        if (prevLast && prevLast.role === 'assistant') {
-                            if (!prevLast.webSearches) prevLast.webSearches = [];
-                            const existingIdx = prevLast.webSearches.findIndex(s => s.query === searchEntry.query);
-                            if (existingIdx >= 0) {
-                                prevLast.webSearches[existingIdx] = { ...searchEntry, isSearching: false };
-                            } else {
-                                prevLast.webSearches.push({ ...searchEntry, isSearching: false });
-                            }
-                        }
-                        // Add new assistant message for the follow-up
-                        return [...updated, { role: 'assistant', content: '' }];
-                    });
-                    isInNewMessage = true;
-                } else {
-                    // Update web search info on current message (search in progress or done)
-                    setMessages(prev => {
-                        const updated = [...prev];
-                        const last = updated[updated.length - 1];
-                        if (last && last.role === 'assistant') {
-                            if (!last.webSearches) last.webSearches = [];
-                            const existingIdx = last.webSearches.findIndex(s => s.query === searchEntry.query);
-                            if (existingIdx >= 0) {
-                                last.webSearches[existingIdx] = searchEntry;
-                            } else {
-                                last.webSearches.push(searchEntry);
-                            }
-                        }
-                        return updated;
-                    });
-                }
-            }, (reasoningChunk) => {
-                // Handle reasoning content (from models like DeepSeek)
-                accumulatedReasoning += reasoningChunk;
-                const msgIndex = newMessages.length; // Index of the assistant message
-
-                // Start timer when first reasoning chunk arrives
-                if (accumulatedReasoning === reasoningChunk) {
-                    const startTime = Date.now();
-                    reasoningStartTimeRef.current[msgIndex] = startTime;
-                    setReasoningStartTime(prev => ({ ...prev, [msgIndex]: startTime }));
-                }
-
-                setMessages(prev => {
-                    const updated = [...prev];
-                    const last = updated[updated.length - 1];
-                    if (last && last.role === 'assistant') {
-                        last.reasoning = accumulatedReasoning;
-                    }
-                    return updated;
-                });
-            }, (imageUrl) => {
-                // Handle images from models that generate images
-                setMessages(prev => {
-                    const updated = [...prev];
-                    const last = updated[updated.length - 1];
-                    if (last && last.role === 'assistant') {
-                        if (!last.images) {
-                            last.images = [];
-                        }
-                        last.images.push(imageUrl);
-                    }
-                    return updated;
-                });
-            });
-
-            if (res.error) {
+            if (res.error && isCurrent()) {
                 setError(res.error);
             }
         } catch (err: any) {
-            if (err.name === 'AbortError') {
-                // Aborted - still record response time for interrupted messages
-                const responseTime = Date.now() - startTime;
-                const msgIndex = newMessages.length;
-
-                // Calculate and store final reasoning time if reasoning was happening
-                if (reasoningStartTimeRef.current[msgIndex]) {
-                    const finalElapsed = Math.floor((Date.now() - reasoningStartTimeRef.current[msgIndex]) / 1000);
-                    setReasoningElapsed(prev => ({ ...prev, [msgIndex]: finalElapsed }));
-
-                    // Also save to the message itself for persistence
-                    setMessages(prev => {
-                        const updated = [...prev];
-                        const last = updated[updated.length - 1];
-                        if (last && last.role === 'assistant') {
-                            last.interrupted = true;
-                            last.responseTime = responseTime;
-                            last.reasoningTime = finalElapsed;
-                        }
-                        return updated;
-                    });
+            if (isCurrent()) {
+                if (err.name === 'AbortError') {
+                    handlers.markInterrupted();
                 } else {
-                    setMessages(prev => {
-                        const updated = [...prev];
-                        const last = updated[updated.length - 1];
-                        if (last && last.role === 'assistant') {
-                            last.interrupted = true;
-                            last.responseTime = responseTime;
-                        }
-                        return updated;
-                    });
+                    setError(err.message);
                 }
-            } else {
-                setError(err.message);
             }
         } finally {
-            setLoading(false);
-            abortControllerRef.current = null;
+            if (isCurrent()) {
+                abortControllerRef.current = null;
+                loadingRef.current = false;
+                setLoading(false);
+            }
+            // Don't leave the finished stream around to be "restored" later
+            if (mountedRef.current) {
+                chrome.runtime.sendMessage({ action: 'clear_active_stream', onlyIfDone: true }).catch(() => { });
+            }
 
-            // Restore original model selection
-            const restoredConfig = {
-                ...config,
-                selectedProvider: previousProvider,
-                selectedModel: {
-                    ...config.selectedModel,
-                    [previousProvider]: previousModel
-                }
-            };
-            setConfig(restoredConfig);
+            // Restore original model selection, unless the user picked another model meanwhile
+            setConfig(prev => {
+                if (prev.selectedProvider !== provider || prev.selectedModel[provider] !== model) return prev;
+                return {
+                    ...prev,
+                    selectedProvider: previousProvider,
+                    selectedModel: {
+                        ...prev.selectedModel,
+                        [provider]: previousModelForProvider
+                    }
+                };
+            });
         }
     };
 
     const handleSubmit = async (overrideInstruction?: string, overrideConfig?: AppConfig) => {
+        // Only one request at a time - a second one would race the first over shared state
+        if (loading || loadingRef.current) return;
+
         const textToSubmit = overrideInstruction !== undefined ? overrideInstruction : instruction;
         let activeConfig = overrideConfig || config;
 
-        const hasContext = !!(selectedText || selectedImage);
+        // Context is only attached to the first message of a conversation
+        const hasContext = messages.length === 0 && !!(selectedText || selectedImage);
         if (!textToSubmit.trim() && !hasContext) return;
 
+        loadingRef.current = true;
         setLoading(true);
         setError('');
 
@@ -1116,7 +1144,10 @@ export default function ChatInterface({
         if (abortControllerRef.current) {
             abortControllerRef.current.abort();
         }
-        abortControllerRef.current = new AbortController();
+        // One controller for the whole request, fallbacks included, so Stop aborts whatever is running
+        const controller = new AbortController();
+        abortControllerRef.current = controller;
+        const isCurrent = () => abortControllerRef.current === controller;
 
         let userContent = textToSubmit.trim();
         let messagePayload: ChatMessage;
@@ -1142,7 +1173,6 @@ export default function ChatInterface({
         }
 
         const newMessages = [...messages, messagePayload];
-        setMessages(newMessages);
         setInstruction('');
 
         if (textareaRef.current) {
@@ -1160,266 +1190,27 @@ export default function ChatInterface({
         // Scroll to bottom when user sends a message
         scrollToBottom();
 
-        let accumulatedText = '';
-        let accumulatedReasoning = '';
-        let isInNewMessage = false;
-        let reasoningFinalized = false; // Track if we've stopped the reasoning timer
-
-        // Helper to finalize reasoning timer when content starts
-        const finalizeReasoningTimer = (msgIndex: number) => {
-            if (!reasoningFinalized && accumulatedReasoning && reasoningStartTimeRef.current[msgIndex]) {
-                reasoningFinalized = true;
-                const finalElapsed = Math.floor((Date.now() - reasoningStartTimeRef.current[msgIndex]) / 1000);
-                setReasoningElapsed(prev => ({ ...prev, [msgIndex]: finalElapsed }));
-
-                // Update message with final reasoning time
-                setMessages(prev => {
-                    const updated = [...prev];
-                    if (updated[msgIndex] && updated[msgIndex].role === 'assistant') {
-                        updated[msgIndex].reasoningTime = finalElapsed;
-                    }
-                    return updated;
-                });
-
-                // Clear the start time for this message
-                delete reasoningStartTimeRef.current[msgIndex];
-                setReasoningStartTime(prev => {
-                    const newState = { ...prev };
-                    delete newState[msgIndex];
-                    return newState;
-                });
-            }
-        };
+        const handlers = createStreamHandlers(newMessages.length, startTime);
+        const runRequest = (requestConfig: AppConfig) => callApi(newMessages, requestConfig, handlers.onChunk, controller.signal,
+            handlers.onWebSearch, handlers.onReasoning, handlers.onImage);
 
         try {
-            let res = await callApi(newMessages, activeConfig, (chunk) => {
-                const msgIndex = newMessages.length; // Index of the assistant message
-
-                // Finalize reasoning timer on first content chunk
-                finalizeReasoningTimer(msgIndex);
-
-                if (isInNewMessage) {
-                    // Append to the new (follow-up) message
-                    accumulatedText += chunk;
-                    const currentResponseTime = Date.now() - startTime;
-                    setMessages(prev => {
-                        const updated = [...prev];
-                        const last = updated[updated.length - 1];
-                        if (last && last.role === 'assistant') {
-                            last.content = accumulatedText;
-                            last.responseTime = currentResponseTime;
-                        }
-                        return updated;
-                    });
-                } else {
-                    // Append to the initial message
-                    accumulatedText += chunk;
-                    const currentResponseTime = Date.now() - startTime;
-                    setMessages(prev => {
-                        const updated = [...prev];
-                        const last = updated[updated.length - 1];
-                        if (last && last.role === 'assistant') {
-                            last.content = accumulatedText;
-                            last.responseTime = currentResponseTime;
-                        }
-                        return updated;
-                    });
-                }
-            }, abortControllerRef.current.signal, (searchStatus) => {
-                const searchEntry = {
-                    query: searchStatus.query,
-                    result: searchStatus.result || '',
-                    isSearching: searchStatus.isSearching,
-                    sources: searchStatus.sources
-                };
-                if (searchStatus.startNewMessage) {
-                    accumulatedText = ''; // Reset for new message
-                    accumulatedReasoning = ''; // Reset reasoning for new message
-                    setMessages(prev => {
-                        const updated = [...prev];
-                        const prevLast = updated[updated.length - 1];
-                        if (prevLast && prevLast.role === 'assistant') {
-                            if (!prevLast.webSearches) prevLast.webSearches = [];
-                            const existingIdx = prevLast.webSearches.findIndex(s => s.query === searchEntry.query);
-                            if (existingIdx >= 0) {
-                                prevLast.webSearches[existingIdx] = { ...searchEntry, isSearching: false };
-                            } else {
-                                prevLast.webSearches.push({ ...searchEntry, isSearching: false });
-                            }
-                        }
-                        return [...updated, { role: 'assistant', content: '' }];
-                    });
-                    isInNewMessage = true;
-                } else {
-                    setMessages(prev => {
-                        const updated = [...prev];
-                        const last = updated[updated.length - 1];
-                        if (last && last.role === 'assistant') {
-                            if (!last.webSearches) last.webSearches = [];
-                            const existingIdx = last.webSearches.findIndex(s => s.query === searchEntry.query);
-                            if (existingIdx >= 0) {
-                                last.webSearches[existingIdx] = searchEntry;
-                            } else {
-                                last.webSearches.push(searchEntry);
-                            }
-                        }
-                        return updated;
-                    });
-                }
-            }, (reasoningChunk) => {
-                // Handle reasoning content (from models like DeepSeek)
-                accumulatedReasoning += reasoningChunk;
-                const msgIndex = newMessages.length; // Index of the assistant message
-
-                // Start timer when first reasoning chunk arrives
-                if (accumulatedReasoning === reasoningChunk) {
-                    const startTime = Date.now();
-                    reasoningStartTimeRef.current[msgIndex] = startTime;
-                    setReasoningStartTime(prev => ({ ...prev, [msgIndex]: startTime }));
-                }
-
-                setMessages(prev => {
-                    const updated = [...prev];
-                    const last = updated[updated.length - 1];
-                    if (last && last.role === 'assistant') {
-                        last.reasoning = accumulatedReasoning;
-                    }
-                    return updated;
-                });
-            }, (imageUrl) => {
-                // Handle images from models that generate images
-                setMessages(prev => {
-                    const updated = [...prev];
-                    const last = updated[updated.length - 1];
-                    if (last && last.role === 'assistant') {
-                        if (!last.images) {
-                            last.images = [];
-                        }
-                        last.images.push(imageUrl);
-                    }
-                    return updated;
-                });
-            });
+            let res = await runRequest(activeConfig);
 
             // Fallback: If the request used a prompt-specific override model and got an error,
             // retry with the primary model before trying other fallbacks
-            if (res.error && overrideConfig) {
+            if (res.error && overrideConfig && isCurrent()) {
                 const isSameAsPrimary = config.selectedProvider === activeConfig.selectedProvider &&
                     config.selectedModel[config.selectedProvider] === activeConfig.selectedModel[activeConfig.selectedProvider];
 
                 if (!isSameAsPrimary) {
                     console.log(`Prompt override model failed (${res.error}), retrying with primary model: ${config.selectedProvider}/${config.selectedModel[config.selectedProvider]}`);
 
-                    // Reset accumulated text for retry
-                    accumulatedText = '';
-                    accumulatedReasoning = '';
-                    isInNewMessage = false;
-                    reasoningFinalized = false;
+                    // Reset the assistant message (no longer using override model)
+                    handlers.reset();
 
-                    // Reset the assistant message
-                    setMessages(prev => {
-                        const updated = [...prev];
-                        const last = updated[updated.length - 1];
-                        if (last && last.role === 'assistant') {
-                            last.content = '';
-                            last.reasoning = undefined;
-                            last.webSearches = undefined;
-                            last.images = undefined;
-                            last.modelUsed = undefined; // No longer using override model
-                        }
-                        return updated;
-                    });
-
-                    // Create new abort controller for retry
-                    abortControllerRef.current = new AbortController();
-
-                    // Retry with primary config
-                    const primaryRetryRes = await callApi(newMessages, config, (chunk) => {
-                        const msgIndex = newMessages.length;
-                        finalizeReasoningTimer(msgIndex);
-
-                        accumulatedText += chunk;
-                        const currentResponseTime = Date.now() - startTime;
-                        setMessages(prev => {
-                            const updated = [...prev];
-                            const last = updated[updated.length - 1];
-                            if (last && last.role === 'assistant') {
-                                last.content = accumulatedText;
-                                last.responseTime = currentResponseTime;
-                            }
-                            return updated;
-                        });
-                    }, abortControllerRef.current.signal, (searchStatus) => {
-                        const searchEntry = {
-                            query: searchStatus.query,
-                            result: searchStatus.result || '',
-                            isSearching: searchStatus.isSearching,
-                            sources: searchStatus.sources
-                        };
-                        if (searchStatus.startNewMessage) {
-                            accumulatedText = '';
-                            accumulatedReasoning = '';
-                            setMessages(prev => {
-                                const updated = [...prev];
-                                const prevLast = updated[updated.length - 1];
-                                if (prevLast && prevLast.role === 'assistant') {
-                                    if (!prevLast.webSearches) prevLast.webSearches = [];
-                                    const existingIdx = prevLast.webSearches.findIndex(s => s.query === searchEntry.query);
-                                    if (existingIdx >= 0) {
-                                        prevLast.webSearches[existingIdx] = { ...searchEntry, isSearching: false };
-                                    } else {
-                                        prevLast.webSearches.push({ ...searchEntry, isSearching: false });
-                                    }
-                                }
-                                return [...updated, { role: 'assistant', content: '' }];
-                            });
-                            isInNewMessage = true;
-                        } else {
-                            setMessages(prev => {
-                                const updated = [...prev];
-                                const last = updated[updated.length - 1];
-                                if (last && last.role === 'assistant') {
-                                    if (!last.webSearches) last.webSearches = [];
-                                    const existingIdx = last.webSearches.findIndex(s => s.query === searchEntry.query);
-                                    if (existingIdx >= 0) {
-                                        last.webSearches[existingIdx] = searchEntry;
-                                    } else {
-                                        last.webSearches.push(searchEntry);
-                                    }
-                                }
-                                return updated;
-                            });
-                        }
-                    }, (reasoningChunk) => {
-                        accumulatedReasoning += reasoningChunk;
-                        const msgIndex = newMessages.length;
-                        if (accumulatedReasoning === reasoningChunk) {
-                            const reasoningStart = Date.now();
-                            reasoningStartTimeRef.current[msgIndex] = reasoningStart;
-                            setReasoningStartTime(prev => ({ ...prev, [msgIndex]: reasoningStart }));
-                        }
-                        setMessages(prev => {
-                            const updated = [...prev];
-                            const last = updated[updated.length - 1];
-                            if (last && last.role === 'assistant') {
-                                last.reasoning = accumulatedReasoning;
-                            }
-                            return updated;
-                        });
-                    }, (imageUrl) => {
-                        setMessages(prev => {
-                            const updated = [...prev];
-                            const last = updated[updated.length - 1];
-                            if (last && last.role === 'assistant') {
-                                if (!last.images) last.images = [];
-                                last.images.push(imageUrl);
-                            }
-                            return updated;
-                        });
-                    });
-
-                    // If primary model also failed, use res reference for further fallbacks
-                    res = primaryRetryRes;
+                    // Retry with primary config. If it also fails, res feeds the fallbacks below
+                    res = await runRequest(config);
                     // Update activeConfig reference for vision fallback check below
                     activeConfig = config;
                 }
@@ -1428,7 +1219,7 @@ export default function ChatInterface({
             // Check for errors when images are present - fall back to vision model
             // This handles cases where the model doesn't support images (various error messages)
             const hasImageInConversation = newMessages.some(m => m.image);
-            if (res.error && hasImageInConversation && activeConfig.visionModel) {
+            if (res.error && hasImageInConversation && activeConfig.visionModel && isCurrent()) {
                 const visionModel = activeConfig.visionModel;
                 // Don't fallback to the same provider+model that just failed
                 const isSameModel = visionModel.provider === activeConfig.selectedProvider &&
@@ -1447,98 +1238,13 @@ export default function ChatInterface({
                         }
                     };
 
-                    // Reset accumulated text for retry
-                    accumulatedText = '';
-                    accumulatedReasoning = '';
-                    isInNewMessage = false;
-
                     // Reset the assistant message
-                    setMessages(prev => {
-                        const updated = [...prev];
-                        const last = updated[updated.length - 1];
-                        if (last && last.role === 'assistant') {
-                            last.content = '';
-                            last.reasoning = undefined;
-                        }
-                        return updated;
-                    });
-
-                    // Create new abort controller for retry
-                    abortControllerRef.current = new AbortController();
+                    handlers.reset();
 
                     // Retry with vision model config
-                    const fallbackRes = await callApi(newMessages, visionConfig, (chunk) => {
-                        accumulatedText += chunk;
-                        const currentResponseTime = Date.now() - startTime;
-                        setMessages(prev => {
-                            const updated = [...prev];
-                            const last = updated[updated.length - 1];
-                            if (last && last.role === 'assistant') {
-                                last.content = accumulatedText;
-                                last.responseTime = currentResponseTime;
-                            }
-                            return updated;
-                        });
-                    }, abortControllerRef.current.signal, (searchStatus) => {
-                        const searchEntry = {
-                            query: searchStatus.query,
-                            result: searchStatus.result || '',
-                            isSearching: searchStatus.isSearching,
-                            sources: searchStatus.sources
-                        };
-                        if (searchStatus.startNewMessage) {
-                            accumulatedText = '';
-                            accumulatedReasoning = '';
-                            setMessages(prev => {
-                                const updated = [...prev];
-                                const prevLast = updated[updated.length - 1];
-                                if (prevLast && prevLast.role === 'assistant') {
-                                    if (!prevLast.webSearches) prevLast.webSearches = [];
-                                    const existingIdx = prevLast.webSearches.findIndex(s => s.query === searchEntry.query);
-                                    if (existingIdx >= 0) {
-                                        prevLast.webSearches[existingIdx] = { ...searchEntry, isSearching: false };
-                                    } else {
-                                        prevLast.webSearches.push({ ...searchEntry, isSearching: false });
-                                    }
-                                }
-                                return [...updated, { role: 'assistant', content: '' }];
-                            });
-                            isInNewMessage = true;
-                        } else {
-                            setMessages(prev => {
-                                const updated = [...prev];
-                                const last = updated[updated.length - 1];
-                                if (last && last.role === 'assistant') {
-                                    if (!last.webSearches) last.webSearches = [];
-                                    const existingIdx = last.webSearches.findIndex(s => s.query === searchEntry.query);
-                                    if (existingIdx >= 0) {
-                                        last.webSearches[existingIdx] = searchEntry;
-                                    } else {
-                                        last.webSearches.push(searchEntry);
-                                    }
-                                }
-                                return updated;
-                            });
-                        }
-                    }, (reasoningChunk) => {
-                        accumulatedReasoning += reasoningChunk;
-                        const msgIndex = newMessages.length;
-                        if (accumulatedReasoning === reasoningChunk) {
-                            const reasoningStart = Date.now();
-                            reasoningStartTimeRef.current[msgIndex] = reasoningStart;
-                            setReasoningStartTime(prev => ({ ...prev, [msgIndex]: reasoningStart }));
-                        }
-                        setMessages(prev => {
-                            const updated = [...prev];
-                            const last = updated[updated.length - 1];
-                            if (last && last.role === 'assistant') {
-                                last.reasoning = accumulatedReasoning;
-                            }
-                            return updated;
-                        });
-                    });
+                    const fallbackRes = await runRequest(visionConfig);
 
-                    if (fallbackRes.error) {
+                    if (fallbackRes.error && isCurrent()) {
                         setError(fallbackRes.error);
                     }
                     // Don't show fallback notice - just work silently
@@ -1546,48 +1252,28 @@ export default function ChatInterface({
                 }
             }
 
-            if (res.error) {
+            if (res.error && isCurrent()) {
                 setError(res.error);
             }
         } catch (err: any) {
-            if (err.name === 'AbortError') {
-                // Aborted - still record response time for interrupted messages
-                const responseTime = Date.now() - startTime;
-                const msgIndex = newMessages.length;
-
-                // Calculate and store final reasoning time if reasoning was happening
-                if (reasoningStartTimeRef.current[msgIndex]) {
-                    const finalElapsed = Math.floor((Date.now() - reasoningStartTimeRef.current[msgIndex]) / 1000);
-                    setReasoningElapsed(prev => ({ ...prev, [msgIndex]: finalElapsed }));
-
-                    // Also save to the message itself for persistence
-                    setMessages(prev => {
-                        const updated = [...prev];
-                        const last = updated[updated.length - 1];
-                        if (last && last.role === 'assistant') {
-                            last.interrupted = true;
-                            last.responseTime = responseTime;
-                            last.reasoningTime = finalElapsed;
-                        }
-                        return updated;
-                    });
+            if (isCurrent()) {
+                if (err.name === 'AbortError') {
+                    handlers.markInterrupted();
                 } else {
-                    setMessages(prev => {
-                        const updated = [...prev];
-                        const last = updated[updated.length - 1];
-                        if (last && last.role === 'assistant') {
-                            last.interrupted = true;
-                            last.responseTime = responseTime;
-                        }
-                        return updated;
-                    });
+                    setError(err.message);
                 }
-            } else {
-                setError(err.message);
             }
         } finally {
-            setLoading(false);
-            abortControllerRef.current = null;
+            if (isCurrent()) {
+                abortControllerRef.current = null;
+                loadingRef.current = false;
+                setLoading(false);
+            }
+            // Don't leave the finished stream around to be "restored" later
+            // (e.g. after New Chat). If we unmounted mid-stream, keep it for the restore path.
+            if (mountedRef.current) {
+                chrome.runtime.sendMessage({ action: 'clear_active_stream', onlyIfDone: true }).catch(() => { });
+            }
         }
     };
 
@@ -1663,7 +1349,7 @@ export default function ChatInterface({
                                             onClick={(e) => e.stopPropagation()}
                                             onKeyDown={(e) => {
                                                 e.stopPropagation();
-                                                if (e.key === 'Enter' && modelSearch.trim() && filteredModelGroups.length === 0 && allProviders.length > 0) {
+                                                if (e.key === 'Enter' && !e.nativeEvent.isComposing && e.keyCode !== 229 && modelSearch.trim() && filteredModelGroups.length === 0 && allProviders.length > 0) {
                                                     // Use search term as custom model for current provider
                                                     handleModelChange(config.selectedProvider as Provider, modelSearch.trim());
                                                 }
@@ -1755,6 +1441,8 @@ export default function ChatInterface({
                 <div className="flex items-center gap-2" onMouseDown={e => e.stopPropagation()}>
                     <button
                         onClick={() => {
+                            // Stop any in-flight response so it can't come back into the new chat
+                            abortControllerRef.current?.abort();
                             destroyChromeNanoSession();
                             setMessages([]);
                             setInstruction('');
@@ -2227,7 +1915,8 @@ export default function ChatInterface({
                                 <div className="relative" ref={retryModelMenuOpen === idx ? retryModelMenuRef : null}>
                                     <button
                                         onClick={() => setRetryModelMenuOpen(retryModelMenuOpen === idx ? null : idx)}
-                                        className="p-1 text-slate-400 dark:text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition-colors"
+                                        disabled={loading}
+                                        className="p-1 disabled:opacity-40 disabled:pointer-events-none text-slate-400 dark:text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition-colors"
                                         title="Try with another model"
                                     >
                                         <RefreshCw size={12} />
@@ -2344,7 +2033,8 @@ export default function ChatInterface({
                         className="w-full bg-transparent border-none focus:ring-0 p-0 pr-10 text-sm text-slate-900 dark:text-gpt-text placeholder:text-slate-400 dark:placeholder:text-zinc-500 resize-none max-h-[200px] min-h-[20px] overflow-y-auto no-scrollbar outline-none"
                         rows={1}
                         onKeyDown={(e) => {
-                            if (e.key === 'Enter' && !e.shiftKey) {
+                            // Ignore Enter while an IME (e.g. Vietnamese/CJK input) is composing
+                            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                                 e.preventDefault();
                                 handleSubmit();
                             }
@@ -2367,7 +2057,7 @@ export default function ChatInterface({
                         ) : (
                             <button
                                 onClick={() => handleSubmit()}
-                                disabled={!instruction.trim() && !selectedText && !selectedImage}
+                                disabled={!instruction.trim() && !(messages.length === 0 && (selectedText || selectedImage))}
                                 className="w-8 h-8 bg-blue-600 hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-700 text-white rounded-lg shadow-md hover:shadow-lg disabled:opacity-50 disabled:bg-slate-300 dark:disabled:bg-slate-700 disabled:text-slate-500 dark:disabled:text-slate-400 disabled:cursor-not-allowed disabled:shadow-none transition-all duration-200 flex items-center justify-center"
                             >
                                 <Send size={14} />

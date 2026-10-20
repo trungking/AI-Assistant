@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { type AppConfig, type ChatMessage, DEFAULT_CONFIG } from './types';
 import { getStorage, setStorage, getSelectedText } from './storage';
 
@@ -10,8 +10,19 @@ export const useAppConfig = (initialConfig?: AppConfig) => {
         // If initialConfig provided, we assume it's fresh enough or we just load strictly from storage to be sure?
         // Usually hooks should load truth from storage.
         const load = async () => {
-            const stored = await getStorage();
-            setConfigState(stored);
+            // getStorage throws while a synced config is only partially downloaded;
+            // retry briefly rather than rendering nothing forever
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    const stored = await getStorage();
+                    setConfigState(stored);
+                    setLoading(false);
+                    return;
+                } catch (e) {
+                    console.error('[AI Assistant] Failed to load config:', e);
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+            }
             setLoading(false);
         };
         load();
@@ -19,7 +30,11 @@ export const useAppConfig = (initialConfig?: AppConfig) => {
 
     const updateConfig = async (newConfig: AppConfig) => {
         setConfigState(newConfig);
-        await setStorage(newConfig);
+        try {
+            await setStorage(newConfig);
+        } catch (e) {
+            console.error('[AI Assistant] Failed to save config:', e);
+        }
     };
 
     return { config, loading, updateConfig };
@@ -48,12 +63,18 @@ export const useChatState = ({
     initialMessages = [],
     isFreshContext = false
 }: UseChatStateProps = {}) => {
-    const [state, setState] = useState<ChatState>({
+    const [state, setStateRaw] = useState<ChatState>({
         instruction: initialInstruction,
         messages: initialMessages,
         selectedText: initialText,
         selectedImage: initialImage
     });
+    // Latest state, readable synchronously (e.g. from an unmount cleanup)
+    const stateRef = useRef(state);
+    const setState = (next: ChatState) => {
+        stateRef.current = next;
+        setStateRaw(next);
+    };
     const [hydrated, setHydrated] = useState(false);
     const [autoExecutePromptId, setAutoExecutePromptId] = useState<string | null>(null);
 
@@ -122,7 +143,7 @@ export const useChatState = ({
                     });
                 } else {
                     // No previous state, just use current page text
-                    setState(prev => ({ ...prev, selectedText: pageText }));
+                    setState({ ...stateRef.current, selectedText: pageText });
                 }
             }
 
@@ -131,23 +152,24 @@ export const useChatState = ({
         init();
     }, []);
 
-    const updateState = (newState: Partial<ChatState>) => {
-        setState(prev => {
-            const updated = { ...prev, ...newState };
-            // Persist
-            const stateToSave = {
+    // Stable identity: ChatInterface uses this in effects. Persist outside the setState
+    // updater, which never runs when the whole React root is being unmounted.
+    const updateState = useCallback((newState: Partial<ChatState>) => {
+        const updated = { ...stateRef.current, ...newState };
+        stateRef.current = updated;
+        chrome.storage.local.set({
+            popupState: {
                 instruction: updated.instruction,
                 messages: updated.messages,
                 selectedText: updated.selectedText,
                 selectedImage: updated.selectedImage,
                 timestamp: Date.now()
-            };
-            chrome.storage.local.set({ popupState: stateToSave }).catch(error => {
-                console.error('[AI Assistant] Failed to save chat state:', error);
-            });
-            return updated;
+            }
+        }).catch(error => {
+            console.error('[AI Assistant] Failed to save chat state:', error);
         });
-    };
+        setStateRaw(updated);
+    }, []);
 
     return { state, updateState, hydrated, autoExecutePromptId };
 };

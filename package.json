@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node scripts/bump-version.js && tsc -b && vite build && vite build -c vite.content.config.ts",
+    "build": "tsc -b && vite build && vite build -c vite.content.config.ts && node scripts/bump-version.js",
     "build:ci": "tsc -b && vite build && vite build -c vite.content.config.ts",
     "lint": "eslint .",
+    "test": "node --experimental-vm-modules --test tests/extension-messaging.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

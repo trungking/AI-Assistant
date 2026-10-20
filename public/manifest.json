@@ -9,7 +9,8 @@
     "storage",
     "unlimitedStorage",
     "scripting",
-    "system.display"
+    "system.display",
+    "declarativeNetRequestWithHostAccess"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -46,7 +47,8 @@
     {
       "resources": [
         "icons/*.png",
-        "assets/*"
+        "assets/*",
+        "lib/katex/fonts/*"
       ],
       "matches": [
         "<all_urls>"

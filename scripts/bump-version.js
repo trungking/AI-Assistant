@@ -7,12 +7,24 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
 
 const manifestPath = path.join(rootDir, 'public', 'manifest.json');
+const distManifestPath = path.join(rootDir, 'dist', 'manifest.json');
 const packagePath = path.join(rootDir, 'package.json');
 
 function bumpVersion(version) {
-    const parts = version.split('.').map(Number);
+    // Missing or non-numeric parts count as 0 (e.g. "1.2" -> "1.2.1")
+    const parts = String(version).split('.').map(part => Number.parseInt(part, 10) || 0);
+    while (parts.length < 3) parts.push(0);
     parts[2] += 1;
     return parts.join('.');
+}
+
+// The build runs before this script, so dist/ already holds a copy of the old
+// public/manifest.json. Refresh it so the built extension carries the new version.
+function syncDistManifest() {
+    if (fs.existsSync(path.dirname(distManifestPath))) {
+        fs.copyFileSync(manifestPath, distManifestPath);
+        console.log('Copied updated manifest to dist/manifest.json');
+    }
 }
 
 // Update Manifest
@@ -38,6 +50,7 @@ if (fs.existsSync(manifestPath) && fs.existsSync(packagePath)) {
         fs.writeFileSync(packagePath, JSON.stringify(pkg, null, 2) + '\n');
         console.log(`Synced package.json version to ${newVersion}`);
     }
+    syncDistManifest();
 } else {
     console.error('Manifest file not found!');
     process.exit(1);

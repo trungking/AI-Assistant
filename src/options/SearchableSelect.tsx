@@ -14,8 +14,11 @@ interface SearchableSelectProps {
 export function SearchableSelect({ value, options, onChange, onCustomClick, onOpen, placeholder }: SearchableSelectProps) {
     const [isOpen, setIsOpen] = useState(false);
     const [search, setSearch] = useState('');
+    const [highlighted, setHighlighted] = useState(0);
     const containerRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
+    const buttonRef = useRef<HTMLButtonElement>(null);
+    const listRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -29,13 +32,11 @@ export function SearchableSelect({ value, options, onChange, onCustomClick, onOp
     }, []);
 
     useEffect(() => {
+        // Open unfiltered, with the current value highlighted
+        setSearch('');
         if (isOpen && inputRef.current) {
-            // Pre-fill with current value
-            setSearch(value || '');
+            setHighlighted(Math.max(0, options.indexOf(value)));
             inputRef.current.focus();
-            inputRef.current.select();
-        } else {
-            setSearch('');
         }
     }, [isOpen]);
 
@@ -43,9 +44,54 @@ export function SearchableSelect({ value, options, onChange, onCustomClick, onOp
         option.toLowerCase().includes(search.toLowerCase())
     );
 
+    useEffect(() => {
+        listRef.current?.querySelector<HTMLElement>(`[data-index="${highlighted}"]`)?.scrollIntoView({ block: 'nearest' });
+    }, [highlighted, isOpen]);
+
+    const close = (refocus = false) => {
+        setIsOpen(false);
+        if (refocus) buttonRef.current?.focus();
+    };
+
+    const select = (option: string) => {
+        onChange(option);
+        close(true);
+    };
+
+    const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+        e.stopPropagation();
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            close(true);
+        } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (filteredOptions.length === 0) return;
+            const step = e.key === 'ArrowDown' ? 1 : -1;
+            setHighlighted(prev => (prev + step + filteredOptions.length) % filteredOptions.length);
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            const term = search.trim();
+            // Exact match, else highlighted item, else the typed text as a custom model
+            const exact = term
+                ? filteredOptions.find(o => o === term) ?? filteredOptions.find(o => o.toLowerCase() === term.toLowerCase())
+                : undefined;
+            const picked = exact ?? filteredOptions[Math.min(highlighted, filteredOptions.length - 1)];
+            if (picked !== undefined) select(picked);
+            else if (term) select(term);
+        }
+    };
+
     return (
-        <div className="relative" ref={containerRef}>
+        <div
+            className="relative"
+            ref={containerRef}
+            onBlur={(e) => {
+                // Close when focus leaves the component (e.g. Tab away)
+                if (!containerRef.current?.contains(e.relatedTarget as Node | null)) setIsOpen(false);
+            }}
+        >
             <button
+                ref={buttonRef}
                 onClick={() => {
                     const opening = !isOpen;
                     setIsOpen(opening);
@@ -60,7 +106,11 @@ export function SearchableSelect({ value, options, onChange, onCustomClick, onOp
             </button>
 
             {isOpen && (
-                <div className="absolute top-full left-0 right-0 mt-1 bg-white dark:bg-gpt-sidebar border border-slate-200 dark:border-gpt-hover rounded-lg shadow-lg z-50 max-h-96 flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-100">
+                <div
+                    className="absolute top-full left-0 right-0 mt-1 bg-white dark:bg-gpt-sidebar border border-slate-200 dark:border-gpt-hover rounded-lg shadow-lg z-50 max-h-96 flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-100"
+                    // Keep focus in the search box while clicking inside the dropdown
+                    onMouseDown={(e) => { if (e.target !== inputRef.current) e.preventDefault(); }}
+                >
                     <div className="p-2 border-b border-slate-100 dark:border-gpt-hover">
                         <div className="relative">
                             <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -69,17 +119,10 @@ export function SearchableSelect({ value, options, onChange, onCustomClick, onOp
                                 type="text"
                                 placeholder="Search..."
                                 value={search}
-                                onChange={(e) => setSearch(e.target.value)}
+                                onChange={(e) => { setSearch(e.target.value); setHighlighted(0); }}
                                 className="w-full pl-8 pr-8 py-1.5 text-sm bg-slate-50 dark:bg-gpt-input border border-slate-200 dark:border-gpt-hover rounded-md focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 text-slate-700 dark:text-gpt-text"
                                 onClick={(e) => e.stopPropagation()}
-                                onKeyDown={(e) => {
-                                    e.stopPropagation();
-                                    if (e.key === 'Enter' && search.trim() && filteredOptions.length === 0) {
-                                        // Use search term as custom model
-                                        onChange(search.trim());
-                                        setIsOpen(false);
-                                    }
-                                }}
+                                onKeyDown={handleSearchKeyDown}
                             />
                             {search && (
                                 <button
@@ -97,7 +140,7 @@ export function SearchableSelect({ value, options, onChange, onCustomClick, onOp
                         </div>
                     </div>
 
-                    <div className="overflow-y-auto flex-1 p-1">
+                    <div className="overflow-y-auto flex-1 p-1" ref={listRef}>
                         {filteredOptions.length === 0 ? (
                             <div className="px-3 py-8 text-center">
                                 <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">No matching models found.</p>
@@ -106,18 +149,19 @@ export function SearchableSelect({ value, options, onChange, onCustomClick, onOp
                                 )}
                             </div>
                         ) : (
-                            filteredOptions.map((option) => (
+                            filteredOptions.map((option, index) => (
                                 <button
                                     key={option}
-                                    onClick={() => {
-                                        onChange(option);
-                                        setIsOpen(false);
-                                    }}
+                                    data-index={index}
+                                    tabIndex={-1}
+                                    onClick={() => select(option)}
+                                    onMouseEnter={() => setHighlighted(index)}
                                     className={clsx(
                                         "w-full text-left px-3 py-2 text-sm rounded-md flex items-center justify-between transition-colors",
                                         value === option
                                             ? "bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 font-medium"
-                                            : "text-slate-700 dark:text-gpt-text hover:bg-slate-50 dark:hover:bg-gpt-hover"
+                                            : "text-slate-700 dark:text-gpt-text hover:bg-slate-50 dark:hover:bg-gpt-hover",
+                                        index === highlighted && "ring-1 ring-inset ring-blue-400/60"
                                     )}
                                 >
                                     <span className="truncate">{option}</span>
@@ -132,7 +176,7 @@ export function SearchableSelect({ value, options, onChange, onCustomClick, onOp
                             <button
                                 onClick={() => {
                                     onCustomClick();
-                                    setIsOpen(false);
+                                    close();
                                 }}
                                 className="w-full px-3 py-2 text-xs font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-colors flex items-center justify-center gap-1.5"
                             >

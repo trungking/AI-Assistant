@@ -41,13 +41,10 @@ const imageUrlToDataUrl = async (imageUrl: string): Promise<string> => {
 };
 
 chrome.runtime.onInstalled.addListener(async () => {
-    // Initialize storage with defaults if not present
-    const { appConfig } = await chrome.storage.sync.get('appConfig');
-    if (!appConfig) {
-        await setStorage(DEFAULT_CONFIG);
-    }
+    // Menus persist across updates; recreating them without clearing first
+    // fails with duplicate-id errors. Do this before anything that can throw.
+    await chrome.contextMenus.removeAll();
 
-    // Create context menu
     chrome.contextMenus.create({
         id: "ai-ask-context",
         title: "Ask AI Assistant",
@@ -59,6 +56,16 @@ chrome.runtime.onInstalled.addListener(async () => {
         title: "Ask AI about this image",
         contexts: ["image"]
     });
+
+    // Initialize storage with defaults if not present
+    try {
+        const { appConfig } = await chrome.storage.sync.get('appConfig');
+        if (!appConfig) {
+            await setStorage(DEFAULT_CONFIG);
+        }
+    } catch (error) {
+        console.error('[AI Assistant] Failed to initialize storage:', error);
+    }
 
     // Chrome leaves already-open tabs without a live content script on update/reload.
     void refreshContentScripts().catch(error => {
@@ -218,8 +225,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 import { executeApiCall, executeFetchModels, executeApiStream } from '../lib/api';
 
 // --- Background Stream Continuation ---
-// Keeps track of the active background stream so it can survive popup disconnects
-let activeStreamState: {
+type StreamState = {
     id: string;
     port: chrome.runtime.Port | null;
     controller: AbortController;
@@ -231,7 +237,52 @@ let activeStreamState: {
     done: boolean;
     error: string | null;
     startTime: number;
-} | null = null;
+    lastActivity: number;
+    idleTimedOut: boolean;
+};
+
+// Keeps track of the latest background stream so it can survive popup disconnects
+let activeStreamState: StreamState | null = null;
+
+// Streams that have not finished yet, keyed by id (several UIs can stream at once)
+const runningStreams = new Map<string, StreamState>();
+
+// Stop requests that arrived before their stream started
+const abortedStreamIds = new Set<string>();
+
+const findStream = (id: string | undefined): StreamState | null => {
+    if (!id) return activeStreamState;
+    return runningStreams.get(id) ?? (activeStreamState?.id === id ? activeStreamState : null);
+};
+
+// Abort streams that receive nothing for this long, so a stalled connection
+// can't keep the worker alive forever once nobody is around to press Stop.
+const STREAM_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+// Chrome terminates an idle service worker after ~30s, and an in-flight fetch
+// does not count as activity. While a model is thinking no chunks arrive, so the
+// worker could be killed mid-request (server sees "499 context canceled").
+// Calling an extension API periodically resets the idle timer.
+const KEEPALIVE_INTERVAL_MS = 20_000;
+let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+
+const updateKeepAlive = () => {
+    if (runningStreams.size > 0 && !keepAliveTimer) {
+        keepAliveTimer = setInterval(() => {
+            void chrome.runtime.getPlatformInfo().catch(() => { });
+            const now = Date.now();
+            for (const stream of runningStreams.values()) {
+                if (now - stream.lastActivity > STREAM_IDLE_TIMEOUT_MS) {
+                    stream.idleTimedOut = true;
+                    stream.controller.abort();
+                }
+            }
+        }, KEEPALIVE_INTERVAL_MS);
+    } else if (runningStreams.size === 0 && keepAliveTimer) {
+        clearInterval(keepAliveTimer);
+        keepAliveTimer = null;
+    }
+};
 
 // Save active stream state to storage so popup can recover
 const saveActiveStreamToStorage = async () => {
@@ -280,14 +331,13 @@ const clearActiveStream = async () => {
 
 chrome.runtime.onConnect.addListener((port) => {
     if (port.name === 'stream_api') {
-        const controller = new AbortController();
-        const streamId = Date.now().toString(36) + Math.random().toString(36).slice(2);
-
-        // Create the active stream state
-        activeStreamState = {
-            id: streamId,
+        // Each stream keeps its own state so a newer stream can't swallow the
+        // final done/error message of an older one that is still running.
+        const state: StreamState = {
+            // Replaced by the caller-generated id when the request arrives
+            id: Date.now().toString(36) + Math.random().toString(36).slice(2),
             port: port,
-            controller: controller,
+            controller: new AbortController(),
             accumulatedText: '',
             accumulatedReasoning: '',
             messages: [],
@@ -296,25 +346,46 @@ chrome.runtime.onConnect.addListener((port) => {
             done: false,
             error: null,
             startTime: Date.now(),
+            lastActivity: Date.now(),
+            idleTimedOut: false,
         };
+        activeStreamState = state;
+
+        const isActive = () => activeStreamState === state;
 
         const safeSend = (msg: any) => {
-            if (activeStreamState?.port) {
+            if (state.port) {
                 try {
-                    activeStreamState.port.postMessage(msg);
+                    state.port.postMessage(msg);
                 } catch (e) {
                     // Port disconnected, stop trying to send
-                    if (activeStreamState) {
-                        activeStreamState.port = null;
-                    }
+                    state.port = null;
                 }
+            }
+        };
+
+        const onProgress = () => {
+            state.lastActivity = Date.now();
+            // Periodically save to storage when port is disconnected
+            if (!state.port && isActive()) {
+                scheduleActiveStreamSave();
+            }
+        };
+
+        const finish = async () => {
+            state.done = true;
+            runningStreams.delete(state.id);
+            updateKeepAlive();
+            if (isActive()) {
+                await saveActiveStreamToStorage();
             }
         };
 
         port.onDisconnect.addListener(() => {
             // DON'T abort the stream - let it continue in background
-            if (activeStreamState && activeStreamState.id === streamId) {
-                activeStreamState.port = null;
+            if (state.port !== port) return; // a reconnected popup owns it now
+            state.port = null;
+            if (isActive()) {
                 // Save current state so popup can reconnect
                 persistActiveStream();
             }
@@ -322,134 +393,125 @@ chrome.runtime.onConnect.addListener((port) => {
 
         port.onMessage.addListener(async (msg) => {
             if (msg.messages && msg.config) {
-                if (activeStreamState) {
-                    activeStreamState.messages = msg.messages;
+                if (typeof msg.streamId === 'string') {
+                    state.id = msg.streamId;
                 }
+                state.messages = msg.messages;
+
+                if (abortedStreamIds.delete(state.id)) {
+                    // Stopped before it started
+                    await finish();
+                    return;
+                }
+
+                runningStreams.set(state.id, state);
+                updateKeepAlive();
 
                 try {
                     const res = await executeApiStream(
                         msg.messages,
                         msg.config,
                         (chunk) => {
-                            if (activeStreamState && activeStreamState.id === streamId) {
-                                activeStreamState.accumulatedText += chunk;
-                                safeSend({ chunk });
-                                // Periodically save to storage when port is disconnected
-                                if (!activeStreamState.port) {
-                                    scheduleActiveStreamSave();
-                                }
-                            }
+                            state.accumulatedText += chunk;
+                            safeSend({ chunk });
+                            onProgress();
                         },
-                        controller.signal,
+                        state.controller.signal,
                         (webSearch) => {
-                            if (activeStreamState && activeStreamState.id === streamId) {
-                                activeStreamState.webSearches.push(webSearch);
-                                safeSend({ webSearch });
-                                if (!activeStreamState.port) {
-                                    scheduleActiveStreamSave();
-                                }
-                            }
+                            state.webSearches.push(webSearch);
+                            safeSend({ webSearch });
+                            onProgress();
                         },
                         (reasoning) => {
-                            if (activeStreamState && activeStreamState.id === streamId) {
-                                activeStreamState.accumulatedReasoning += reasoning;
-                                safeSend({ reasoning });
-                                if (!activeStreamState.port) {
-                                    scheduleActiveStreamSave();
-                                }
-                            }
+                            state.accumulatedReasoning += reasoning;
+                            safeSend({ reasoning });
+                            onProgress();
                         },
                         (image) => {
-                            if (activeStreamState && activeStreamState.id === streamId) {
-                                activeStreamState.images.push(image);
-                                safeSend({ image });
-                                if (!activeStreamState.port) {
-                                    scheduleActiveStreamSave();
-                                }
-                            }
+                            state.images.push(image);
+                            safeSend({ image });
+                            onProgress();
                         }
                     );
 
-                    if (activeStreamState && activeStreamState.id === streamId) {
-                        if (res.error) {
-                            activeStreamState.error = res.error;
-                            activeStreamState.done = true;
-                            safeSend({ error: res.error });
-                        } else {
-                            activeStreamState.done = true;
-                            safeSend({ done: true });
-                        }
-                        // Save final state and then clear after a delay
-                        await saveActiveStreamToStorage();
-                    }
-                } catch (e: any) {
-                    if (e.name === 'AbortError') {
-                        // Aborted by user (stop button)
-                        if (activeStreamState && activeStreamState.id === streamId) {
-                            activeStreamState.done = true;
-                            await saveActiveStreamToStorage();
-                        }
-                        return;
-                    }
-                    if (activeStreamState && activeStreamState.id === streamId) {
-                        activeStreamState.error = e.message;
-                        activeStreamState.done = true;
-                        safeSend({ error: e.message });
+                    if (res.error) {
+                        state.error = res.error;
+                        safeSend({ error: res.error });
+                    } else {
                         safeSend({ done: true });
-                        await saveActiveStreamToStorage();
                     }
+                    await finish();
+                } catch (e: any) {
+                    if (state.idleTimedOut) {
+                        state.error = 'No data received from the server for a long time, so the request was stopped. Please try again.';
+                        safeSend({ error: state.error });
+                    } else if (e.name === 'AbortError') {
+                        // Aborted by user (stop button). The caller normally has
+                        // already settled; this only matters if its port is still open.
+                        safeSend({ error: 'Request was cancelled.' });
+                    } else {
+                        state.error = e.message;
+                        safeSend({ error: e.message });
+                    }
+                    await finish();
                 }
             }
         });
-    } else if (port.name === 'stream_reconnect') {
-        // Handle reconnection from popup that was closed and reopened
-        if (activeStreamState) {
-            activeStreamState.port = port;
+    } else if (port.name === 'stream_reconnect' || port.name.startsWith('stream_reconnect:')) {
+        // Handle reconnection from popup that was closed and reopened.
+        // The popup passes the stored stream id so it never attaches to another UI's stream.
+        const requestedId = port.name.slice('stream_reconnect:'.length) || undefined;
+        const target = findStream(requestedId);
+        if (target) {
+            target.port = port;
 
             // Send all buffered data
             try {
-                if (activeStreamState.accumulatedText) {
-                    port.postMessage({ chunk: activeStreamState.accumulatedText });
+                if (target.accumulatedText) {
+                    port.postMessage({ chunk: target.accumulatedText });
                 }
-                if (activeStreamState.accumulatedReasoning) {
-                    port.postMessage({ reasoning: activeStreamState.accumulatedReasoning });
+                if (target.accumulatedReasoning) {
+                    port.postMessage({ reasoning: target.accumulatedReasoning });
                 }
-                for (const ws of activeStreamState.webSearches) {
+                for (const ws of target.webSearches) {
                     port.postMessage({ webSearch: ws });
                 }
-                for (const img of activeStreamState.images) {
+                for (const img of target.images) {
                     port.postMessage({ image: img });
                 }
 
-                if (activeStreamState.done) {
-                    if (activeStreamState.error) {
-                        port.postMessage({ error: activeStreamState.error });
+                if (target.done) {
+                    if (target.error) {
+                        port.postMessage({ error: target.error });
                     } else {
                         port.postMessage({ done: true });
                     }
                     // Stream is done, clear it
-                    clearActiveStream();
+                    if (target === activeStreamState) {
+                        void clearActiveStream();
+                    }
                 } else {
                     // Stream is still running, send a reconnected signal
                     port.postMessage({ reconnected: true, streaming: true });
                 }
             } catch (e) {
                 // Port failed
-                if (activeStreamState) {
-                    activeStreamState.port = null;
+                if (target.port === port) {
+                    target.port = null;
                 }
             }
 
             port.onDisconnect.addListener(() => {
-                if (activeStreamState) {
-                    activeStreamState.port = null;
+                if (target.port !== port) return;
+                target.port = null;
+                if (target === activeStreamState) {
                     persistActiveStream();
                 }
             });
         } else {
-            // No active stream, just notify
+            // No such stream (e.g. the service worker restarted and lost it)
             try {
-                port.postMessage({ done: true, noStream: true });
+                port.postMessage({ noStream: true });
             } catch (e) { /* ignore */ }
         }
     }
@@ -457,11 +519,22 @@ chrome.runtime.onConnect.addListener((port) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === 'abort_stream') {
-        // Allow popup to abort the active background stream
-        if (activeStreamState && !activeStreamState.done) {
-            activeStreamState.controller.abort();
-            activeStreamState.done = true;
-            saveActiveStreamToStorage().then(() => {
+        // Abort the caller's stream when it identifies one, otherwise the active stream
+        const target = findStream(message.streamId);
+        if (!target && message.streamId) {
+            // The request hasn't reached the background yet; drop it when it does
+            abortedStreamIds.add(message.streamId);
+            if (abortedStreamIds.size > 50) {
+                abortedStreamIds.delete(abortedStreamIds.values().next().value as string);
+            }
+        }
+        if (target && !target.done) {
+            target.controller.abort();
+            target.done = true;
+            runningStreams.delete(target.id);
+            updateKeepAlive();
+            const save = target === activeStreamState ? saveActiveStreamToStorage() : Promise.resolve();
+            save.then(() => {
                 sendResponse({ aborted: true });
             });
         } else {
@@ -469,9 +542,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         return true;
     } else if (message.action === 'clear_active_stream') {
-        clearActiveStream().then(() => {
-            sendResponse({ cleared: true });
-        });
+        // Only clear the record the caller is talking about, never a newer
+        // stream started from another popup
+        const matchesId = !message.streamId || !activeStreamState || activeStreamState.id === message.streamId;
+        const allowedByState = !message.onlyIfDone || !activeStreamState || activeStreamState.done;
+        if (matchesId && allowedByState) {
+            clearActiveStream().then(() => {
+                sendResponse({ cleared: true });
+            });
+        } else {
+            sendResponse({ cleared: false });
+        }
         return true;
     } else if (message.action === 'open_popup_hotkey' || message.action === 'toggle_popup_hotkey') {
         // Store selection if present

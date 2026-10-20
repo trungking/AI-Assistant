@@ -1,54 +1,7 @@
-import type { AppConfig, PromptTemplate } from '../lib/types';
+import type { AppConfig } from '../lib/types';
+import { getStorage, isConfigStorageChange } from '../lib/storage';
 import { openContentPopup, closeContentPopup, isContentPopupOpen, forceCloseContentPopup } from './ContentPopup';
 import { startCropMode, cancelCropMode } from './CropOverlay';
-
-// Inline Default Config to avoid shared chunk import issues in content scripts
-// (Or import from types if build confirms it works, forcing inline here for safety as before)
-const DEFAULT_PROMPTS: PromptTemplate[] = [
-    { id: '1', name: 'Summarize', content: 'Summarize the following text:\n\n${text}' },
-    { id: '2', name: 'Explain', content: 'Explain this text in simple terms:\n\n${text}' },
-    { id: '3', name: 'Translate to English', content: 'Translate the following text to English:\n\n${text}' },
-    { id: '4', name: 'Fix Grammar', content: 'Fix the grammar and improve the writing of the following text:\n\n${text}' },
-];
-
-const SYSTEM_PROMPT_STORAGE_KEY = 'appConfig.systemPrompt';
-
-const DEFAULT_CONFIG: AppConfig = {
-    apiKeys: {
-        openai: [],
-        google: [],
-        anthropic: [],
-        openrouter: [],
-        perplexity: [],
-    },
-    selectedProvider: 'google',
-    customBaseUrls: {
-        openai: 'https://api.openai.com/v1',
-        google: 'https://generativelanguage.googleapis.com/v1beta',
-        anthropic: 'https://api.anthropic.com/v1',
-        openrouter: 'https://openrouter.ai/api/v1',
-        perplexity: 'https://api.perplexity.ai',
-    },
-    prompts: DEFAULT_PROMPTS,
-    selectedModel: {
-        chrome: 'Gemini Nano',
-        openai: 'gpt-4o-mini',
-        google: 'gemini-1.5-flash',
-        anthropic: 'claude-3-haiku-20240307',
-        openrouter: 'google/gemini-2.0-flash-exp:free',
-        perplexity: 'sonar-pro',
-    },
-    customProviders: [],
-    customHotkey: null,
-    cropHotkey: null,
-    theme: 'system',
-    popupMode: 'extension',
-    popupSize: { width: 450, height: 600 },
-    webSearchProvider: 'perplexity',
-    kagiSession: '',
-    braveApiKeys: [],
-    systemPrompt: 'You are a helpful assistant.\n\nToday\'s date is ${date}.'
-};
 
 /**
  * Extract text from a DOM node, preserving emoji alt text from img elements.
@@ -129,28 +82,6 @@ const extractTextFromSelection = (): string => {
     return simpleText;
 };
 
-const getStorage = async (): Promise<AppConfig> => {
-    const [syncResult, localResult] = await Promise.all([
-        chrome.storage.sync.get('appConfig'),
-        chrome.storage.local.get(SYSTEM_PROMPT_STORAGE_KEY),
-    ]);
-
-    const stored = (syncResult.appConfig || {}) as Partial<AppConfig>;
-    const localSystemPrompt = localResult[SYSTEM_PROMPT_STORAGE_KEY];
-
-    // Deep merge for nested objects
-    return {
-        ...DEFAULT_CONFIG,
-        ...stored,
-        systemPrompt: typeof localSystemPrompt === 'string'
-            ? localSystemPrompt
-            : stored.systemPrompt ?? DEFAULT_CONFIG.systemPrompt,
-        apiKeys: { ...DEFAULT_CONFIG.apiKeys, ...stored.apiKeys },
-        customBaseUrls: { ...DEFAULT_CONFIG.customBaseUrls, ...stored.customBaseUrls },
-        selectedModel: { ...DEFAULT_CONFIG.selectedModel, ...stored.selectedModel },
-    };
-};
-
 let config: AppConfig | null = null;
 
 // Initialize config
@@ -166,7 +97,8 @@ const init = async () => {
 // local write would be copied into this listener in every open tab.
 // Popups re-read the full config (including the local system prompt) on open.
 const handleStorageChange = (changes: Record<string, chrome.storage.StorageChange>) => {
-    if (changes.appConfig) {
+    if (disposeIfStale()) return;
+    if (isConfigStorageChange(changes, 'sync')) {
         getStorage()
             .then(freshConfig => {
                 config = freshConfig;
@@ -179,6 +111,7 @@ const handleStorageChange = (changes: Record<string, chrome.storage.StorageChang
 
 // Listen for messages from background script
 const handleMessage = (message: { action?: string; selection?: string; image?: string }, _sender: chrome.runtime.MessageSender, sendResponse: (response: unknown) => void) => {
+    if (disposeIfStale()) return;
     if (message.action !== 'open_content_popup') return;
     getStorage().then(freshConfig => {
         config = freshConfig;
@@ -190,16 +123,41 @@ const handleMessage = (message: { action?: string; selection?: string; image?: s
     return true;
 };
 
+const NON_TEXT_INPUT_TYPES = new Set([
+    'button', 'checkbox', 'color', 'file', 'image', 'radio', 'range', 'reset', 'submit',
+]);
+
+// Whether the keydown originated in a field the user is typing into
+// (including fields inside open shadow roots, via composedPath()).
+const isEditableTarget = (e: KeyboardEvent): boolean => {
+    const target = e.composedPath()[0] ?? e.target;
+    if (!(target instanceof HTMLElement)) return false;
+    if (target.isContentEditable) return true;
+    if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return true;
+    if (target instanceof HTMLInputElement) return !NON_TEXT_INPUT_TYPES.has(target.type);
+    return false;
+};
+
+// Hotkeys without Ctrl/Alt/Meta would hijack normal typing in page fields.
+const hasNonShiftModifier = (hotkey: { modifiers: string[] }): boolean =>
+    hotkey.modifiers.some(m => ['ctrl', 'control', 'alt', 'meta', 'command'].includes(m.toLowerCase()));
+
 // Hotkey Listener
 const handleHotkey = (e: KeyboardEvent) => {
+    if (disposeIfStale()) return;
     if (!config) return;
+    // Autofill dispatches keydown events without a key; IME composition must not trigger hotkeys.
+    if (!e.key || e.isComposing || e.keyCode === 229) return;
 
     const eventKey = e.key.toLowerCase();
     // Helper to ignore modifier keys themselves
     if (['control', 'alt', 'shift', 'meta'].includes(eventKey)) return;
 
+    const inEditable = isEditableTarget(e);
+    const isAllowedHere = (hotkey: { modifiers: string[] }) => !inEditable || hasNonShiftModifier(hotkey);
+
     // Check Crop Hotkey
-    if (config.cropHotkey) {
+    if (config.cropHotkey && isAllowedHere(config.cropHotkey)) {
         const { key, modifiers } = config.cropHotkey;
         const targetKey = key.toLowerCase();
 
@@ -247,7 +205,7 @@ const handleHotkey = (e: KeyboardEvent) => {
     }
 
     // Check Global Hotkey
-    if (config.customHotkey) {
+    if (config.customHotkey && isAllowedHere(config.customHotkey)) {
         const { key, modifiers } = config.customHotkey;
         const targetKey = key.toLowerCase();
 
@@ -296,7 +254,7 @@ const handleHotkey = (e: KeyboardEvent) => {
     // Check Prompt Hotkeys
     if (config.prompts) {
         for (const prompt of config.prompts) {
-            if (!prompt.hotkey) continue;
+            if (!prompt.hotkey || !isAllowedHere(prompt.hotkey)) continue;
 
             const { key, modifiers } = prompt.hotkey;
             const targetKey = key.toLowerCase();
@@ -349,6 +307,29 @@ const handleHotkey = (e: KeyboardEvent) => {
     }
 };
 
+let disposed = false;
+function dispose() {
+    if (disposed) return;
+    disposed = true;
+    window.removeEventListener('keydown', handleHotkey);
+    cancelCropMode();
+    forceCloseContentPopup();
+    try {
+        chrome.storage.sync.onChanged.removeListener(handleStorageChange);
+        chrome.runtime.onMessage.removeListener(handleMessage);
+    } catch { /* The old extension context may already be invalid. */ }
+}
+
+// After an extension reload/update, this script's context is invalidated
+// (chrome.runtime.id becomes undefined). A re-injected script may run in a
+// fresh isolated world and cannot reach us, so stale handlers dispose themselves.
+function disposeIfStale(): boolean {
+    if (disposed) return true;
+    if (chrome.runtime?.id) return false;
+    dispose();
+    return true;
+}
+
 // Re-injection must replace an invalidated script without duplicating hotkeys.
 const contentGlobal = globalThis as typeof globalThis & {
     __aiAssistantContent?: { runtime: typeof chrome.runtime; dispose: () => void };
@@ -361,15 +342,7 @@ if (!previous?.runtime.id) {
     window.addEventListener('keydown', handleHotkey);
     contentGlobal.__aiAssistantContent = {
         runtime: chrome.runtime,
-        dispose: () => {
-            window.removeEventListener('keydown', handleHotkey);
-            cancelCropMode();
-            forceCloseContentPopup();
-            try {
-                chrome.storage.sync.onChanged.removeListener(handleStorageChange);
-                chrome.runtime.onMessage.removeListener(handleMessage);
-            } catch { /* The old extension context may already be invalid. */ }
-        },
+        dispose,
     };
     void init();
 }

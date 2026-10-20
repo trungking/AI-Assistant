@@ -141,9 +141,15 @@ test('content reinjection retains one hotkey/message listener and replaces inval
     const cropModule = new vm.SyntheticModule(['startCropMode', 'cancelCropMode'], function () {
         this.setExport('startCropMode', () => {}); this.setExport('cancelCropMode', () => {});
     }, { context });
+    const storageModule = new vm.SyntheticModule(['getStorage', 'isConfigStorageChange'], function () {
+        this.setExport('getStorage', async () => ({ prompts: [], customHotkey: null, cropHotkey: null }));
+        this.setExport('isConfigStorageChange', changes => 'appConfig' in changes);
+    }, { context });
     async function inject() {
         const module = new vm.SourceTextModule(source, { context });
-        await module.link(specifier => specifier.endsWith('ContentPopup') ? popupModule : cropModule);
+        await module.link(specifier => specifier.endsWith('ContentPopup') ? popupModule
+            : specifier.endsWith('storage') ? storageModule
+                : cropModule);
         await module.evaluate();
     }
     await inject(); await inject();

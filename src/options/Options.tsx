@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { type AppConfig, DEFAULT_CONFIG, type Provider, type PromptTemplate } from '../lib/types';
-import { getStorage, setStorage } from '../lib/storage';
+import { getStorage, setStorage, isConfigStorageChange } from '../lib/storage';
 import { fetchModels } from '../lib/api';
 import { useTheme } from '../lib/theme';
 import { Trash2, Plus, RotateCcw, Eye, EyeOff, Key, MessageSquareText, Settings2, CheckCircle2, RefreshCw, List, Keyboard, Cpu, X, Download, Upload, GripVertical, ImageIcon, Star } from 'lucide-react';
@@ -18,14 +18,20 @@ const ProviderDisplayNames: Record<Provider, string> = {
     perplexity: 'Perplexity (Web Search)'
 };
 
+// Typing in text fields would otherwise hit chrome.storage.sync's write rate limit.
+const SAVE_DEBOUNCE_MS = 500;
+
 export default function Options() {
     const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
     const [loading, setLoading] = useState(true);
     const [activeTab, setActiveTab] = useState<'general' | 'providers' | 'prompts' | 'hotkeys'>('general');
     const [showKey, setShowKey] = useState<Record<string, boolean>>({});
     const [savedToast, setSavedToast] = useState(false);
+    const [saveError, setSaveError] = useState<string | null>(null);
+    const [loadError, setLoadError] = useState<string | null>(null);
     const [fetchedModels, setFetchedModels] = useState<Record<string, string[]>>({});
     const [fetchingModels, setFetchingModels] = useState<Record<string, boolean>>({});
+    const [fetchErrors, setFetchErrors] = useState<Record<string, string>>({});
     const [isCustomModel, setIsCustomModel] = useState<Record<string, boolean>>({});
     const [recordingTarget, setRecordingTarget] = useState<string | null>(null);
     const [showAddProvider, setShowAddProvider] = useState(false);
@@ -37,7 +43,7 @@ export default function Options() {
     const [backupModelName, setBackupModelName] = useState<string>('');
     const [isBackupCustomModel, setIsBackupCustomModel] = useState(false);
     // State for prompt model editing
-    const [editingPromptModel, setEditingPromptModel] = useState<number | null>(null);
+    const [editingPromptModel, setEditingPromptModel] = useState<string | null>(null); // prompt.id
     const [promptModelProvider, setPromptModelProvider] = useState<string>('');
     const [promptModelName, setPromptModelName] = useState<string>('');
     const [isPromptCustomModel, setIsPromptCustomModel] = useState(false);
@@ -51,6 +57,15 @@ export default function Options() {
     const [defaultModelProvider, setDefaultModelProvider] = useState<string>('');
     const [defaultModelName, setDefaultModelName] = useState<string>('');
     const [isDefaultCustomModel, setIsDefaultCustomModel] = useState(false);
+    // Persistence: `config` updates immediately, writes are debounced.
+    const configRef = useRef<AppConfig>(DEFAULT_CONFIG); // what is on screen
+    const persistedRef = useRef<AppConfig>(DEFAULT_CONFIG); // what is known to be in storage
+    const pendingRef = useRef<AppConfig | null>(null); // unsaved edits awaiting flush
+    const saveTimerRef = useRef<number | null>(null);
+    const toastTimerRef = useRef<number | null>(null);
+    // Prompt drag: order before the drag, and whether it ended in a real drop
+    const dragOriginalPromptsRef = useRef<PromptTemplate[] | null>(null);
+    const dropCommittedRef = useRef(false);
 
     const allProviders = [...Providers, ...(config.customProviders || []).map(p => p.id)];
 
@@ -64,13 +79,109 @@ export default function Options() {
         document.documentElement.classList.toggle('dark', isDark);
     }, [isDark]);
 
+    const updateConfigState = (next: AppConfig) => {
+        configRef.current = next;
+        setConfig(next);
+    };
+
+    // Writes pending edits now. Resolves false (and shows an error toast) on failure.
+    const flushSave = useCallback(async (): Promise<boolean> => {
+        if (saveTimerRef.current !== null) {
+            clearTimeout(saveTimerRef.current);
+            saveTimerRef.current = null;
+        }
+        const toWrite = pendingRef.current;
+        if (!toWrite) return true;
+        pendingRef.current = null;
+        try {
+            await setStorage(toWrite);
+            persistedRef.current = toWrite;
+            setSaveError(null);
+            setSavedToast(true);
+            if (toastTimerRef.current !== null) clearTimeout(toastTimerRef.current);
+            toastTimerRef.current = window.setTimeout(() => setSavedToast(false), 2000);
+            return true;
+        } catch (error) {
+            console.error('Failed to save settings:', error);
+            // Keep the edits pending so the next flush (blur, unload) retries them.
+            if (!pendingRef.current) pendingRef.current = toWrite;
+            setSavedToast(false);
+            setSaveError(error instanceof Error ? error.message : String(error));
+            return false;
+        }
+    }, []);
+
     useEffect(() => {
         getStorage().then((data) => {
             if (!data.customProviders) data.customProviders = [];
-            setConfig(data);
+            persistedRef.current = data;
+            updateConfigState(data);
+            setLoading(false);
+        }).catch((error) => {
+            console.error('Failed to load settings:', error);
+            setLoadError(error instanceof Error ? error.message : String(error));
             setLoading(false);
         });
     }, []);
+
+    // Pick up changes made elsewhere (e.g. a model switch in the popup) so stale
+    // in-memory config doesn't overwrite them. Unsaved local edits win per field.
+    useEffect(() => {
+        let disposed = false;
+        const reload = async () => {
+            try {
+                const fresh = await getStorage();
+                if (disposed) return;
+                if (!fresh.customProviders) fresh.customProviders = [];
+                let next = fresh;
+                const pending = pendingRef.current;
+                if (pending) {
+                    const base = persistedRef.current;
+                    const merged: Record<string, unknown> = { ...fresh };
+                    for (const key of Object.keys(pending) as (keyof AppConfig)[]) {
+                        if (JSON.stringify(pending[key]) !== JSON.stringify(base[key])) merged[key] = pending[key];
+                    }
+                    next = merged as unknown as AppConfig;
+                    pendingRef.current = next;
+                }
+                persistedRef.current = fresh;
+                if (JSON.stringify(next) !== JSON.stringify(configRef.current)) {
+                    updateConfigState(next);
+                }
+            } catch (error) {
+                console.error('Failed to reload settings:', error);
+            }
+        };
+        const handleStorageChange = (changes: Record<string, chrome.storage.StorageChange>, areaName: string) => {
+            if (isConfigStorageChange(changes, areaName)) void reload();
+        };
+        chrome.storage.onChanged.addListener(handleStorageChange);
+        return () => {
+            disposed = true;
+            chrome.storage.onChanged.removeListener(handleStorageChange);
+        };
+    }, []);
+
+    // Flush pending edits when the page is hidden, closed, or unmounted.
+    useEffect(() => {
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === 'hidden') void flushSave();
+        };
+        const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+            if (!pendingRef.current) return;
+            void flushSave();
+            // Ask the browser to hold the page while the write completes.
+            e.preventDefault();
+            e.returnValue = '';
+        };
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        return () => {
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+            window.removeEventListener('beforeunload', handleBeforeUnload);
+            void flushSave();
+        };
+    }, [flushSave]);
 
     // Auto-fetch models when backup model provider changes
     useEffect(() => {
@@ -110,11 +221,16 @@ export default function Options() {
         }
     }, [defaultModelProvider, editingDefaultModel]);
 
-    const saveConfig = async (newConfig: AppConfig) => {
-        setConfig(newConfig);
-        await setStorage(newConfig);
-        setSavedToast(true);
-        setTimeout(() => setSavedToast(false), 2000);
+    // Updates state now and persists after SAVE_DEBOUNCE_MS (or right away if immediate).
+    // Resolves false if an immediate save failed.
+    const saveConfig = (newConfig: AppConfig, immediate = false): Promise<boolean> => {
+        updateConfigState(newConfig);
+        pendingRef.current = newConfig;
+        if (saveTimerRef.current !== null) clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+        if (immediate) return flushSave();
+        saveTimerRef.current = window.setTimeout(() => { void flushSave(); }, SAVE_DEBOUNCE_MS);
+        return Promise.resolve(true);
     };
 
     const handleAddKey = (provider: Provider) => {
@@ -124,7 +240,7 @@ export default function Options() {
     };
 
     const handleUpdateKey = (provider: Provider, index: number, value: string) => {
-        const keys = [...config.apiKeys[provider]];
+        const keys = [...(config.apiKeys[provider] || [])];
         keys[index] = value;
         saveConfig({ ...config, apiKeys: { ...config.apiKeys, [provider]: keys } });
     };
@@ -136,7 +252,7 @@ export default function Options() {
     };
 
     const handleRemoveKey = (provider: Provider, index: number) => {
-        const keys = config.apiKeys[provider].filter((_, i) => i !== index);
+        const keys = (config.apiKeys[provider] || []).filter((_, i) => i !== index);
         saveConfig({ ...config, apiKeys: { ...config.apiKeys, [provider]: keys } });
     };
 
@@ -170,6 +286,13 @@ export default function Options() {
         const { [id]: _, ...restKeys } = config.apiKeys;
         const { [id]: __, ...restUrls } = config.customBaseUrls;
         const { [id]: ___, ...restModels } = config.selectedModel;
+        // Drop every reference to the deleted provider
+        const backupModels = Object.fromEntries(
+            Object.entries(config.backupModels || {})
+                .filter(([provider]) => provider !== id)
+                .map(([provider, models]) => [provider, models.filter(m => m.provider !== id)] as const)
+                .filter(([, models]) => models.length > 0)
+        );
 
         saveConfig({
             ...config,
@@ -177,31 +300,54 @@ export default function Options() {
             apiKeys: restKeys,
             customBaseUrls: restUrls,
             selectedModel: restModels,
-            selectedProvider: config.selectedProvider === id ? 'openai' : config.selectedProvider
+            selectedProvider: config.selectedProvider === id ? 'openai' : config.selectedProvider,
+            backupModels,
+            visionModel: config.visionModel?.provider === id ? null : config.visionModel,
+            defaultModel: config.defaultModel?.provider === id ? null : config.defaultModel,
+            prompts: config.prompts.map(p => p.model?.provider === id ? { ...p, model: null } : p),
         });
+
+        // Close any model editor that still has the deleted provider selected
+        if (backupModelProvider === id) { setAddingBackupModel(false); setBackupModelProvider(''); setBackupModelName(''); }
+        if (promptModelProvider === id) { setEditingPromptModel(null); setPromptModelProvider(''); setPromptModelName(''); }
+        if (visionModelProvider === id) { setEditingVisionModel(false); setVisionModelProvider(''); setVisionModelName(''); }
+        if (defaultModelProvider === id) { setEditingDefaultModel(false); setDefaultModelProvider(''); setDefaultModelName(''); }
     };
 
     const handleFetchModels = async (provider: Provider, silent = false) => {
+        // Errors are always shown inline next to the picker; alerts only when not silent
+        const reportError = (message: string) => {
+            setFetchErrors(prev => ({ ...prev, [provider]: message }));
+            if (!silent) alert(message);
+        };
         const keys = config.apiKeys[provider];
         if (!keys || keys.length === 0 || !keys[0]) {
-            if (!silent) alert(`Please add a valid API key for ${ProviderDisplayNames[provider]} first.`);
+            reportError(`Please add a valid API key for ${getProviderName(provider)} first.`);
             return;
         }
 
+        setFetchErrors(prev => {
+            const { [provider]: _, ...rest } = prev;
+            return rest;
+        });
         setFetchingModels(prev => ({ ...prev, [provider]: true }));
         try {
             const models = await fetchModels(provider, keys[0], config.customBaseUrls[provider]);
             if (models.length > 0) {
                 setFetchedModels(prev => ({ ...prev, [provider]: models }));
             } else {
-                if (!silent) alert('No models found or provider does not support listing models.');
+                reportError('No models found or provider does not support listing models.');
             }
         } catch (err: any) {
-            if (!silent) alert(`Failed to fetch models: ${err.message}`);
+            reportError(`Failed to fetch models for ${getProviderName(provider)}: ${err?.message || err}`);
         } finally {
             setFetchingModels(prev => ({ ...prev, [provider]: false }));
         }
     };
+
+    const renderFetchError = (provider: string) => fetchErrors[provider] ? (
+        <p className="mt-1.5 text-[11px] text-red-500 dark:text-red-400 break-words">{fetchErrors[provider]}</p>
+    ) : null;
 
     const handleAddPrompt = () => {
         const newPrompt: PromptTemplate = {
@@ -224,6 +370,8 @@ export default function Options() {
     };
 
     const handlePromptDragStart = (e: React.DragEvent, index: number) => {
+        dragOriginalPromptsRef.current = config.prompts;
+        dropCommittedRef.current = false;
         setDraggedPromptIdx(index);
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', index.toString());
@@ -239,12 +387,25 @@ export default function Options() {
         prompts.splice(index, 0, draggedItem);
 
         setDraggedPromptIdx(index);
-        setConfig({ ...config, prompts });
+        updateConfigState({ ...config, prompts });
+    };
+
+    const handlePromptDrop = (e: React.DragEvent) => {
+        // Also stops the dragged index text being dropped into an input
+        e.preventDefault();
+        dropCommittedRef.current = true;
     };
 
     const handlePromptDragEnd = () => {
-        if (draggedPromptIdx !== null) {
-            saveConfig(config);
+        const original = dragOriginalPromptsRef.current;
+        dragOriginalPromptsRef.current = null;
+        if (draggedPromptIdx !== null && original) {
+            if (dropCommittedRef.current) {
+                saveConfig(config);
+            } else {
+                // Drag was cancelled: restore the original order
+                updateConfigState({ ...config, prompts: original });
+            }
         }
         setDraggedPromptIdx(null);
     };
@@ -292,7 +453,8 @@ export default function Options() {
         if (!file) return;
 
         const reader = new FileReader();
-        reader.onload = (e) => {
+        reader.onload = async (e) => {
+            let newConfig: AppConfig;
             try {
                 const content = e.target?.result as string;
                 const importedConfig = JSON.parse(content);
@@ -301,7 +463,7 @@ export default function Options() {
                 if (typeof importedConfig === 'object' && importedConfig !== null) {
                     // Start with default config to ensure all fields exist, then overwrite with imported data
                     // This handles cases where the imported config might be from an older version
-                    const newConfig: AppConfig = {
+                    newConfig = {
                         ...DEFAULT_CONFIG,
                         ...importedConfig,
                         // Ensure nested objects are merged correctly if they are missing in import or partial
@@ -312,16 +474,23 @@ export default function Options() {
                         // Ensure arrays
                         customProviders: importedConfig.customProviders || [],
                     };
-
-                    saveConfig(newConfig);
-                    alert('Settings imported successfully!');
+                    // Every provider needs a key list (the providers tab maps over it)
+                    for (const p of newConfig.customProviders) {
+                        if (!Array.isArray(newConfig.apiKeys[p.id])) newConfig.apiKeys[p.id] = [];
+                    }
                 } else {
                     throw new Error('Invalid settings file format');
                 }
             } catch (error) {
                 console.error('Import failed:', error);
                 alert('Failed to import settings. valid JSON file?');
+                return;
             }
+
+            const saved = await saveConfig(newConfig, true);
+            alert(saved
+                ? 'Settings imported successfully!'
+                : 'Failed to save the imported settings. See the error message at the bottom of the page.');
         };
         reader.readAsText(file);
         // Reset input so same file can be selected again if needed
@@ -337,8 +506,27 @@ export default function Options() {
         </div>
     );
 
+    // Don't render the editor over defaults: saving would overwrite the stored settings.
+    if (loadError) return (
+        <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-gpt-main text-slate-600 dark:text-gpt-secondary p-6">
+            <div className="max-w-md text-center space-y-3">
+                <p className="text-sm font-semibold text-red-600 dark:text-red-400">Failed to load settings</p>
+                <p className="text-xs break-words">{loadError}</p>
+                <button
+                    onClick={() => location.reload()}
+                    className="px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700"
+                >
+                    Reload
+                </button>
+            </div>
+        </div>
+    );
+
     return (
-        <div className="min-h-screen bg-slate-50 dark:bg-gpt-main font-sans text-slate-800 dark:text-gpt-text selection:bg-blue-100 selection:text-blue-900 pb-20">
+        <div
+            className="min-h-screen bg-slate-50 dark:bg-gpt-main font-sans text-slate-800 dark:text-gpt-text selection:bg-blue-100 selection:text-blue-900 pb-20"
+            onBlur={() => { void flushSave(); }}
+        >
             {/* Header */}
             <div className="bg-white dark:bg-gpt-sidebar border-b border-slate-200 dark:border-gpt-hover sticky top-0 z-10 shadow-sm">
                 <div className="max-w-4xl mx-auto px-6 py-4 flex items-center justify-between">
@@ -410,6 +598,19 @@ export default function Options() {
                     <CheckCircle2 className="text-green-400" size={20} />
                     <span className="font-medium text-sm">Settings saved successfully</span>
                 </div>
+
+                {/* Save Error Toast */}
+                {saveError && (
+                    <div className="fixed bottom-6 right-6 max-w-sm bg-red-600 text-white px-4 py-3 rounded-lg shadow-lg flex items-start gap-3 z-50" role="alert">
+                        <div className="flex-1 min-w-0">
+                            <p className="font-semibold text-sm">Settings were not saved</p>
+                            <p className="text-xs opacity-90 mt-0.5 break-words">{saveError}</p>
+                        </div>
+                        <button onClick={() => setSaveError(null)} className="text-white/80 hover:text-white" title="Dismiss">
+                            <X size={16} />
+                        </button>
+                    </div>
+                )}
 
                 {activeTab === 'general' && (
                     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -782,6 +983,7 @@ export default function Options() {
                                                     </div>
                                                 )}
                                             </div>
+                                            {renderFetchError(visionModelProvider)}
                                         </div>
 
                                         <div className="flex gap-2 pt-1">
@@ -952,6 +1154,7 @@ export default function Options() {
                                                     </div>
                                                 )}
                                             </div>
+                                            {renderFetchError(defaultModelProvider)}
                                         </div>
 
                                         <div className="flex gap-2 pt-1">
@@ -1189,6 +1392,7 @@ export default function Options() {
                                                                 </div>
                                                             )}
                                                         </div>
+                                                        {renderFetchError(backupModelProvider)}
                                                     </div>
 
                                                     <div className="flex gap-2 pt-1">
@@ -1352,7 +1556,7 @@ export default function Options() {
                                                             <input
                                                                 type="text"
                                                                 placeholder="e.g. gpt-4, gemini-pro"
-                                                                value={config.selectedModel[provider]}
+                                                                value={config.selectedModel[provider] || ''}
                                                                 onChange={(e) => saveConfig({
                                                                     ...config,
                                                                     selectedModel: { ...config.selectedModel, [provider]: e.target.value }
@@ -1370,13 +1574,14 @@ export default function Options() {
                                                         </div>
                                                     )}
                                                 </div>
+                                                {renderFetchError(provider)}
                                             </div>
                                             <div>
                                                 <label className="block text-xs font-bold text-slate-500 dark:text-gpt-secondary mb-1.5 uppercase tracking-wider">Base URL <span className="text-slate-300 dark:text-gpt-hover font-normal lowercase">(optional)</span></label>
                                                 <input
                                                     type="text"
                                                     placeholder="Default"
-                                                    value={config.customBaseUrls[provider]}
+                                                    value={config.customBaseUrls[provider] || ''}
                                                     onChange={(e) => saveConfig({
                                                         ...config,
                                                         customBaseUrls: { ...config.customBaseUrls, [provider]: e.target.value }
@@ -1389,12 +1594,12 @@ export default function Options() {
                                         {/* Keys List */}
                                         <div className="space-y-3">
                                             <label className="block text-xs font-bold text-slate-500 dark:text-gpt-secondary uppercase tracking-wider">API Keys</label>
-                                            {config.apiKeys[provider].length === 0 && (
+                                            {(config.apiKeys[provider] || []).length === 0 && (
                                                 <div className="text-sm text-slate-400 italic bg-slate-50 dark:bg-gpt-input p-4 rounded-lg border border-slate-100 dark:border-gpt-hover text-center">
                                                     No API keys configured for {getProviderName(provider)}.
                                                 </div>
                                             )}
-                                            {config.apiKeys[provider].map((key, idx) => (
+                                            {(config.apiKeys[provider] || []).map((key, idx) => (
                                                 <div key={idx} className="flex items-center gap-2 group">
                                                     <div className="relative flex-1">
                                                         <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
@@ -1498,6 +1703,7 @@ export default function Options() {
                                     draggable
                                     onDragStart={(e) => handlePromptDragStart(e, idx)}
                                     onDragOver={(e) => handlePromptDragOver(e, idx)}
+                                    onDrop={handlePromptDrop}
                                     onDragEnd={handlePromptDragEnd}
                                 >
                                     {/* Header Row */}
@@ -1647,7 +1853,7 @@ export default function Options() {
                                             )}
                                         </div>
 
-                                        {editingPromptModel === idx ? (
+                                        {editingPromptModel === prompt.id ? (
                                             <div className="p-3 bg-slate-50 dark:bg-gpt-input rounded-lg border border-slate-200 dark:border-gpt-hover space-y-3">
                                                 <div>
                                                     <label className="block text-xs font-bold text-slate-500 dark:text-gpt-secondary mb-1.5 uppercase tracking-wider">Provider</label>
@@ -1717,6 +1923,7 @@ export default function Options() {
                                                             </div>
                                                         )}
                                                     </div>
+                                                    {renderFetchError(promptModelProvider)}
                                                 </div>
 
                                                 <div className="flex gap-2 pt-1">
@@ -1751,7 +1958,7 @@ export default function Options() {
                                             !prompt.model && (
                                                 <button
                                                     onClick={() => {
-                                                        setEditingPromptModel(idx);
+                                                        setEditingPromptModel(prompt.id);
                                                         setPromptModelProvider(config.selectedProvider);
                                                         setPromptModelName('');
                                                         setIsPromptCustomModel(false);
